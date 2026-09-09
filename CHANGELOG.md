@@ -16,7 +16,7 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [0.1.1-dev.11] - 2026-09-10
 
-Commit: `9d28d86` — `feat: CLI editor final (pack/show/preview override/edit bg)`
+Commit: `29823a9` — `feat: CLI editor final (pack/show/preview override/edit bg)`
 
 Branch: `dev-kz-debug`
 
