@@ -16,7 +16,7 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [0.1.1-dev.6] - 2026-09-10
 
-Commit: `a9536cd` — `fix: metadata render style override (font_size/color/align)`
+Commit: `eb68297` — `fix: metadata render style override (font_size/color/align)`
 
 Branch: `dev-kz-debug`
 
