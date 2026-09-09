@@ -228,6 +228,29 @@ enum MetadataCmd {
         #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
         cjk_font: PathBuf,
     },
+    /// Preview single bubble text without saving JSON (for live editor)
+    Preview {
+        /// Original image path
+        image: PathBuf,
+        /// Metadata JSON file
+        #[arg(long)]
+        metadata: PathBuf,
+        /// Bubble ID
+        #[arg(long)]
+        id: String,
+        /// New text to preview
+        #[arg(long)]
+        text: String,
+        /// Output preview image
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Font path
+        #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
+        font: PathBuf,
+        /// CJK font path
+        #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
+        cjk_font: PathBuf,
+    },
     /// Edit metadata JSON (set translated text or bbox)
     Edit {
         /// Metadata JSON file
@@ -247,6 +270,21 @@ enum MetadataCmd {
         /// Set font family per bubble: "ID=FontName" (can repeat, empty to clear)
         #[arg(long, value_name = "ID=FontName")]
         font_family: Vec<String>,
+        /// Set font size per bubble: "ID=14.5" (can repeat, empty to clear auto)
+        #[arg(long, value_name = "ID=Size")]
+        font_size: Vec<String>,
+        /// Set text color per bubble: "ID=R,G,B" (can repeat, empty to clear)
+        #[arg(long, value_name = "ID=R,G,B")]
+        text_color: Vec<String>,
+        /// Set stroke color per bubble: "ID=R,G,B" (can repeat, empty to clear)
+        #[arg(long, value_name = "ID=R,G,B")]
+        stroke_color: Vec<String>,
+        /// Set align per bubble: "ID=left|center|right" (can repeat, empty to clear)
+        #[arg(long, value_name = "ID=Align")]
+        align: Vec<String>,
+        /// Set edited flag: "ID=true/false" (can repeat)
+        #[arg(long, value_name = "ID=Bool")]
+        edited: Vec<String>,
     },
     /// Validate metadata JSON
     Validate {
@@ -1111,7 +1149,7 @@ async fn main() -> Result<()> {
                 rgb.save(&output)?;
                 println!("Rendered {:?} -> {:?}", image, output);
             }
-            MetadataCmd::Edit { json, set, bbox, add, delete, font_family } => {
+            MetadataCmd::Edit { json, set, bbox, add, delete, font_family, font_size, text_color, stroke_color, align, edited } => {
                 let mut data = metadata::load_page_metadata(&json)?;
                 for s in set {
                     if let Some((id, txt)) = s.split_once('=') {
@@ -1190,13 +1228,83 @@ async fn main() -> Result<()> {
                                 if let Some(style) = b.style.as_mut() { style.font_family = None; }
                                 println!("Cleared font for {}", id);
                             } else {
-                                let style = b.style.get_or_insert_with(|| metadata::BubbleStyle { font_family: None });
+                                let style = b.style.get_or_insert_with(metadata::BubbleStyle::default);
                                 style.font_family = Some(font.to_string());
                                 println!("Set font {} = {}", id, font);
                             }
                         } else {
                             eprintln!("Bubble {} not found for font_family", id);
                         }
+                    }
+                }
+                for s in font_size {
+                    if let Some((id, val)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() { style.font_size = None; }
+                                println!("Cleared font_size for {}", id);
+                            } else if let Ok(f) = val.parse::<f32>() {
+                                let style = b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                style.font_size = Some(f);
+                                println!("Set font_size {} = {}", id, f);
+                            } else { eprintln!("Invalid font_size for {}: {}", id, val); }
+                        } else { eprintln!("Bubble {} not found", id); }
+                    }
+                }
+                for s in text_color {
+                    if let Some((id, val)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() { style.text_color = None; }
+                                println!("Cleared text_color for {}", id);
+                            } else {
+                                let parts: Vec<u8> = val.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                                if parts.len()==3 {
+                                    let style = b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                    style.text_color = Some([parts[0],parts[1],parts[2]]);
+                                    println!("Set text_color {} = {:?}", id, style.text_color);
+                                } else { eprintln!("Invalid text_color for {}: expected R,G,B", id); }
+                            }
+                        } else { eprintln!("Bubble {} not found", id); }
+                    }
+                }
+                for s in stroke_color {
+                    if let Some((id, val)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() { style.stroke_color = None; }
+                                println!("Cleared stroke_color for {}", id);
+                            } else {
+                                let parts: Vec<u8> = val.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                                if parts.len()==3 {
+                                    let style = b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                    style.stroke_color = Some([parts[0],parts[1],parts[2]]);
+                                    println!("Set stroke_color {} = {:?}", id, style.stroke_color);
+                                } else { eprintln!("Invalid stroke_color for {}: expected R,G,B", id); }
+                            }
+                        } else { eprintln!("Bubble {} not found", id); }
+                    }
+                }
+                for s in align {
+                    if let Some((id, val)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() { style.align = None; }
+                                println!("Cleared align for {}", id);
+                            } else {
+                                let style = b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                style.align = Some(val.to_string());
+                                println!("Set align {} = {}", id, val);
+                            }
+                        } else { eprintln!("Bubble {} not found", id); }
+                    }
+                }
+                for s in edited {
+                    if let Some((id, val)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if let Ok(v) = val.parse::<bool>() { b.edited = v; println!("Set edited {} = {}", id, v); }
+                            else { eprintln!("Invalid edited for {}: expected true/false", id); }
+                        } else { eprintln!("Bubble {} not found", id); }
                     }
                 }
                 metadata::save_page_metadata(&json, &data)?;
@@ -1209,6 +1317,37 @@ async fn main() -> Result<()> {
                 if let Ok(proj) = metadata::load_project(&json) {
                     println!("Valid Project v{}: {} pages", proj.version, proj.pages.len());
                 }
+            }
+            MetadataCmd::Preview { image, metadata, id, text, output, font, cjk_font } => {
+                let mut data = metadata::load_page_metadata(&metadata)?;
+                let bubble = data.bubbles.iter().find(|b| b.id == id).cloned().context(format!("Bubble {} not found", id))?;
+                let mut rgb = image::open(&image).with_context(|| format!("Failed to open {:?}", image))?.to_rgb8();
+                // Inpaint just this bubble
+                let det = kzktdk::model::yolo::Detection { x1: bubble.bbox[0], y1: bubble.bbox[1], x2: bubble.bbox[2], y2: bubble.bbox[3], conf: bubble.conf };
+                inpaint_image(&mut rgb, &[det.clone()])?;
+                // Load fonts
+                let font_bytes = if font.exists() { std::fs::read(&font)? } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") { std::fs::read(p)? } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() };
+                let cjk_bytes = if cjk_font.exists() { std::fs::read(&cjk_font).ok() } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") { std::fs::read(p).ok() } else { None };
+                // Check bubble style for font override in preview
+                let style = bubble.style.clone();
+                let custom_bytes: Option<Vec<u8>> = if let Some(s) = &style {
+                    if let Some(fname) = &s.font_family {
+                        kzktdk::font::FontRegistry::list().iter().find(|f| &f.name == fname).and_then(|info| std::fs::read(&info.path).ok())
+                    } else { None }
+                } else { None };
+                let typesetter = if let Some(ref bytes) = custom_bytes {
+                    Typesetter::new(bytes, cjk_bytes.as_deref()).unwrap_or_else(|_| Typesetter::new(&font_bytes, cjk_bytes.as_deref()).unwrap())
+                } else {
+                    Typesetter::new(&font_bytes, cjk_bytes.as_deref())?
+                };
+                // Create a temporary BubbleStyle for preview text with same style but new text
+                let preview_style = style.clone();
+                typesetter.render_bubble_text_with_style(&mut rgb, &det, &text, Some(&data.target_lang), None, preview_style.as_ref());
+                rgb.save(&output)?;
+                println!("Preview bubble {} -> {:?}", id, output);
+                // Also show fit info
+                let info_style = preview_style.as_ref();
+                println!("Preview text: \"{}\" (font_size override {:?}, align {:?})", text, info_style.and_then(|s| s.font_size), info_style.and_then(|s| s.align.as_ref()));
             }
         }
 

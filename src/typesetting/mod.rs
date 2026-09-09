@@ -319,6 +319,18 @@ impl<'a> Typesetter<'a> {
         target_language: Option<&str>,
         force_text_color: Option<Rgb<u8>>,
     ) {
+        self.render_bubble_text_with_style(img, detection, text, target_language, force_text_color, None)
+    }
+
+    pub fn render_bubble_text_with_style(
+        &self,
+        img: &mut RgbImage,
+        detection: &Detection,
+        text: &str,
+        target_language: Option<&str>,
+        force_text_color: Option<Rgb<u8>>,
+        bubble_style: Option<&crate::metadata::BubbleStyle>,
+    ) {
         let is_non_latin = Self::has_non_latin(text);
         // Manga standard typesetting: Latin text is rendered in UPPERCASE
         let display_text = if !is_non_latin {
@@ -331,8 +343,20 @@ impl<'a> Typesetter<'a> {
         let box_h = detection.height() as f32;
         let settings = Self::pick_text_settings(box_w, box_h, &display_text);
 
-        let (best_font_size, best_spacing, final_lines) =
-            self.fit_text(&display_text, box_w, box_h, settings, target_language);
+        let (best_font_size, best_spacing, final_lines) = if let Some(style) = bubble_style {
+            if let Some(fs) = style.font_size {
+                let clamped = fs.clamp(settings.min_font, settings.max_font);
+                let spacing = (clamped * settings.spacing_ratio).round().max(1.0);
+                let scale = PxScale::from(clamped);
+                let max_w = box_w * settings.scale_w;
+                let lines = self.wrap_text_with_hyphenation(&display_text, scale, max_w, target_language);
+                (clamped, spacing, lines)
+            } else {
+                self.fit_text(&display_text, box_w, box_h, settings, target_language)
+            }
+        } else {
+            self.fit_text(&display_text, box_w, box_h, settings, target_language)
+        };
 
         if final_lines.is_empty() {
             return;
@@ -365,15 +389,23 @@ impl<'a> Typesetter<'a> {
         // Pure optical vertical centering
         let start_y = detection.y1 as f32 + (box_h - total_text_h) / 2.0;
 
-        // Auto determine text and stroke colors based on background
+        // Auto determine text and stroke colors based on background, with style override
         let is_dark_bg = detection.is_dark_bg(img);
         let auto_text_color = if is_dark_bg {
             Rgb([255, 255, 255])
         } else {
             Rgb([18, 18, 18])
         };
-        let text_color = force_text_color.unwrap_or(auto_text_color);
-        let stroke_color = if text_color == Rgb([255, 255, 255]) {
+        let text_color = if let Some(style) = bubble_style {
+            if let Some(c) = style.text_color { Rgb(c) } else { force_text_color.unwrap_or(auto_text_color) }
+        } else {
+            force_text_color.unwrap_or(auto_text_color)
+        };
+        // Stroke override
+        let stroke_color = if let Some(style) = bubble_style {
+            if let Some(c) = style.stroke_color { Rgb(c) }
+            else if text_color == Rgb([255, 255, 255]) { Rgb([0, 0, 0]) } else { Rgb([255, 255, 255]) }
+        } else if text_color == Rgb([255, 255, 255]) {
             Rgb([0, 0, 0])
         } else {
             Rgb([255, 255, 255])
@@ -390,7 +422,15 @@ impl<'a> Typesetter<'a> {
         // 1. Render all glyphs to local text_alpha buffer
         for (idx, line) in final_lines.iter().enumerate() {
             let line_w = self.measure_text(line, scale);
-            let line_x = (box_w - line_w) / 2.0;
+            let line_x = if let Some(style) = bubble_style {
+                match style.align.as_deref() {
+                    Some("left") => 0.0,
+                    Some("right") => box_w - line_w,
+                    _ => (box_w - line_w) / 2.0,
+                }
+            } else {
+                (box_w - line_w) / 2.0
+            };
             let baseline_rel_y = (start_y - detection.y1 as f32)
                 + idx as f32 * (best_font_size + effective_line_gap)
                 + cap_h;

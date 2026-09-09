@@ -7,6 +7,14 @@ use std::path::{Path, PathBuf};
 pub struct BubbleStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<[u8;3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_color: Option<[u8;3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
