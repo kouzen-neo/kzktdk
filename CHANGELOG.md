@@ -14,6 +14,38 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.1.1-dev.11] - 2026-09-10
+
+Commit: `9d28d86` — `feat: CLI editor final (pack/show/preview override/edit bg)`
+
+Branch: `dev-kz-debug`
+
+### Added
+- `src/main.rs:16`: `MAIN_HELP_TEMPLATE` tambah contoh `metadata export/edit/render --project/preview/show/pack` + `font` commands — discoverability `kzktdk -h` kini list `metadata` & `font`
+- `src/main.rs:212 MetadataCmd::Show`: `metadata show <json> [--id ID]` auto-detect `PageEditData` (tabel `ID|BBOX|CONF|EDIT|STYLE|TRANSLATED`) atau `Project` (list `pages` + bubble count via `load_project`/`load_page_metadata`)
+- `src/main.rs:212 MetadataCmd::Pack`: `metadata pack <folder> -o out.cbz` — `natural sort natord` + `archive::create_cbz` (3 files 572K CBZ, `page_0001` naming)
+- `src/main.rs:212 MetadataCmd::Render` batch: `--project project.kedit.json --images <folder> --jobs auto` — load `Project`, resolve `data.page` sibling/`--images`, `inpaint_image` + per-bubble `Typesetter` loop per halaman (sequential, `parse_jobs` ready); single mode tetap `image --metadata`
+- `src/main.rs:212 Preview` overrides: `--font-family/--font-size/--text-color/--stroke-color/--align` tanpa save JSON — `preview_style` merge + `has_override` + custom `FontRegistry` bytes, info print `font_size/align/font_family`
+- `src/main.rs:265 Edit`: `--bg-color "ID=R,G,B"` + `--conf "ID=0.99"` (clamp 0..1) + `--clear-style "ID"` (`style=None`) — `save_page_metadata` atomic
+- `src/main.rs:1310 Validate`: auto-detect `Project` vs `PageEditData`, duplicate `id` check, `bbox` bounds vs `width/height` + invalid `x1>=x2` warnings
+- `src/main.rs:1222 Edit bbox`: validasi `x2<=width && y2<=height` + `x1<x2` sebelum `b.bbox=`, untuk `add` juga bounds check
+
+### Changed
+- `src/main.rs:212 Render` signature: `image/metadata Option` + `project/images/jobs` — backward compat single render `image --metadata` tetap jalan
+- `src/main.rs:1318 Preview` signature: `font_family/text_color/stroke_color/align Option<String>`, `font_size Option<f32>` — tanpa break existing `preview` calls
+
+### Tested
+- `cargo build` OK 2 warnings (mut bg_map now used? still warn)
+- `kzktdk -h` grep `metadata|font|pack` YES
+- `metadata show 09_translated.json` 9 baris OK, `show --id 1` 1 baris OK, `show project.kedit.json` 1 pages OK, `live_batch_test/project.kedit.json` 3 pages
+- `metadata edit /tmp/test_edit.json --bg-color "1=255,200,180" --conf "1=0.99" --font-size "1=22" -> --clear-style "1"` + `--bbox "1=10,10,100,100"` valid, `--bbox "1=10,10,2000,2000"` rejected bounds `x2<=644 y2<=910`
+- `metadata preview --font-size 28` -> `28.0` 180K `f1c7`, `--text-color 255,0,0 --align center` 180K OK
+- `metadata render --project live_batch_test/project.kedit.json --images live_batch_test -o /tmp/batch_render --jobs 2` 3 pages 215K/177K/168K `batch render complete`
+- `metadata render single 01_original_page01.jpg --metadata /tmp/test_edit.json -o /tmp/single_render.jpg` 176K OK
+- `metadata pack /tmp/batch_render -o /tmp/packed.cbz` 544K 3 files `page_0001..3` ZIP OK
+
+---
+
 ## [0.1.1-dev.10] - 2026-09-10
 
 Commit: `853236e` — `fix: translate_page use with_style for consistency`
