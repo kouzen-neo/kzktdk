@@ -1121,30 +1121,27 @@ async fn main() -> Result<()> {
                 for b in &data.bubbles {
                     if b.translated.to_uppercase() == "SKIP" || b.translated.trim().is_empty() { continue; }
                     let det = kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf };
-                    // Per-bubble font override
+                    // Per-bubble font override + style (font_size, color, align, etc.)
                     if let Some(style) = &b.style {
                         if let Some(ref fname) = style.font_family {
-                            if let Ok(_) = kzktdk::font::FontRegistry::resolve(fname) {
+                            let mut custom_bytes: Option<Vec<u8>> = None;
+                            if kzktdk::font::FontRegistry::resolve(fname).is_ok() {
                                 let list = kzktdk::font::FontRegistry::list();
                                 if let Some(info) = list.iter().find(|f| &f.name == fname) {
-                                    if let Ok(bytes) = std::fs::read(&info.path) {
-                                        if let Ok(ts) = Typesetter::new(&bytes, cjk_bytes.as_deref()) {
-                                            ts.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
-                                            continue;
-                                        }
-                                    }
+                                    custom_bytes = std::fs::read(&info.path).ok();
                                 }
                             } else if Path::new(fname).exists() {
-                                if let Ok(bytes) = std::fs::read(fname) {
-                                    if let Ok(ts) = Typesetter::new(&bytes, cjk_bytes.as_deref()) {
-                                        ts.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
-                                        continue;
-                                    }
+                                custom_bytes = std::fs::read(fname).ok();
+                            }
+                            if let Some(bytes) = custom_bytes {
+                                if let Ok(ts) = Typesetter::new(&bytes, cjk_bytes.as_deref()) {
+                                    ts.render_bubble_text_with_style(&mut rgb, &det, &b.translated, Some(&data.target_lang), None, Some(style));
+                                    continue;
                                 }
                             }
                         }
                     }
-                    global_typesetter.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
+                    global_typesetter.render_bubble_text_with_style(&mut rgb, &det, &b.translated, Some(&data.target_lang), None, b.style.as_ref());
                 }
                 rgb.save(&output)?;
                 println!("Rendered {:?} -> {:?}", image, output);

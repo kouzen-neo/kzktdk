@@ -14,6 +14,22 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.1.1-dev.6] - 2026-09-10
+
+Commit: `a9536cd` — `fix: metadata render style override (font_size/color/align)`
+
+Branch: `dev-kz-debug`
+
+### Fixed
+- `src/main.rs:1121`: `MetadataCmd::Render` sebelumnya hanya handle `font_family` via `render_bubble_text(..., None)` sehingga `font_size`/`text_color`/`stroke_color`/`align` diabaikan (md5 sama `95c4`). Di-fix ke `render_bubble_text_with_style(..., b.style.as_ref())` + per-bubble custom `Typesetter` tetap pakai `Some(style)` (`custom_bytes` + `Typesetter::new`)
+- Hapus debug `eprintln!` sementara di `src/main.rs:1102,1123-1125` dan `src/typesetting/mod.rs:399,401,405` setelah trace
+
+### Tested
+- Sonico page01 `kzktdk_SONICO_NEW_CMDS_TEST/`: `16_font_size_10/16/28` md5 `b2f0`/`36a7`/`404a` beda, `17_text_red` `7cc4`, `18_text_blue_stroke_yellow` `85d0`, `20_align_left/right` `aad6`/`1db9`, `23_kombinasi` `fdf9` — sebelumnya semua `95c4`
+- `metadata preview` tetap `29_preview_kombinasi.jpg` 180K dengan style kombinasi (size 22, color 255,0,128, center) — `preview` sudah benar pakai `preview_style`
+
+---
+
 ## [0.1.1] - 2026-09-10
 
 Branch: `dev-kz-debug` — `c762821`
