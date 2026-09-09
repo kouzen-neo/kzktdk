@@ -14,7 +14,44 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
-## [0.1.1-dev.6] - 2026-09-10
+## [0.1.1-dev.10] - 2026-09-10
+
+Commit: `853236e` — `fix: translate_page use with_style for consistency`
+
+Branch: `dev-kz-debug`
+
+### Fixed
+- `src/main.rs:1506`: `translate_page()` sebelumnya pakai `render_bubble_text` tanpa style — di-fix ke `render_bubble_text_with_style(..., None, None)` untuk konsistensi dengan `MetadataCmd::Render` (`eb68297`), siap untuk per-bubble style di pipeline translate nanti
+
+### Changed
+- `CHANGELOG.md:17`: extend `0.1.1-dev.7` Tested/Fixed notes untuk `translate_page`
+
+---
+
+## [0.1.1-dev.9] - 2026-09-10
+
+Commit: `c10a510` — `chore: update .gitignore and remove debug bins`
+
+Branch: `dev-kz-debug`
+
+### Changed
+- `.gitignore:5`: tambah `src/bin/test_*.rs` untuk ignore binary debug sementara
+- `rm src/bin/test_deser.rs` + `test_deser2.rs` + `rmdir src/bin` (untracked, `load_page_metadata` debug)
+
+---
+
+## [0.1.1-dev.8] - 2026-09-10
+
+Commit: `33b9ec6` — `docs: update changelog hash for eb68297`
+
+Branch: `dev-kz-debug`
+
+### Changed
+- `CHANGELOG.md:19`: fix hash `a9536cd` → `eb68297` di entry `0.1.1-dev.7` setelah amend
+
+---
+
+## [0.1.1-dev.7] - 2026-09-10
 
 Commit: `eb68297` — `fix: metadata render style override (font_size/color/align)`
 
@@ -22,13 +59,23 @@ Branch: `dev-kz-debug`
 
 ### Fixed
 - `src/main.rs:1121`: `MetadataCmd::Render` sebelumnya hanya handle `font_family` via `render_bubble_text(..., None)` sehingga `font_size`/`text_color`/`stroke_color`/`align` diabaikan (md5 sama `95c4`). Di-fix ke `render_bubble_text_with_style(..., b.style.as_ref())` + per-bubble custom `Typesetter` tetap pakai `Some(style)` (`custom_bytes` + `Typesetter::new`)
-- `src/main.rs:1506`: `translate_page()` pakai `render_bubble_text` (tanpa style) — di-fix ke `render_bubble_text_with_style(..., None, None)` untuk konsistensi (siap untuk per-bubble style di pipeline translate nanti)
 - Hapus debug `eprintln!` sementara di `src/main.rs:1102,1123-1125` dan `src/typesetting/mod.rs:399,401,405` setelah trace
 
 ### Tested
 - Sonico page01 `kzktdk_SONICO_NEW_CMDS_TEST/`: `16_font_size_10/16/28` md5 `b2f0`/`36a7`/`404a` beda, `17_text_red` `7cc4`, `18_text_blue_stroke_yellow` `85d0`, `20_align_left/right` `aad6`/`1db9`, `23_kombinasi` `fdf9` — sebelumnya semua `95c4`
 - `metadata preview` tetap `29_preview_kombinasi.jpg` 180K dengan style kombinasi (size 22, color 255,0,128, center) — `preview` sudah benar pakai `preview_style`
 - `cargo build` OK, `metadata render` re-test `17_text_red.json` vs base md5 distinct `7cc4` vs `95c4`
+
+---
+
+## [0.1.1-dev.6] - 2026-09-10
+
+Commit: `ff6225f` — `docs: changelog Tahap 1+2 font & style`
+
+Branch: `dev-kz-debug`
+
+### Changed
+- `CHANGELOG.md`: tambah `0.1.1-dev.4` (`a3671f2` Tahap 1 font registry) + `0.1.1-dev.5` (`093bc28` Tahap 2 style editing) — per-commit tracking
 
 ---
 
