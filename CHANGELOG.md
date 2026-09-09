@@ -21,65 +21,36 @@ Commit: `29823a9` — `feat: CLI editor final (pack/show/preview override/edit b
 Branch: `dev-kz-debug`
 
 ### Added
-- `src/main.rs:16` `MAIN_HELP_TEMPLATE`: 8 contoh baru + `Commands` section `metadata`/`font` — `kzktdk -h` kini tampil:
-  ```
-  kzktdk metadata export <input> --json page.kedit.json
-  kzktdk metadata edit <json> --set "1=Halo" --bbox "1=x1,y1,x2,y2" --font-size "1=22"
-  kzktdk metadata render <image> --metadata page.kedit.json -o out.jpg
-  kzktdk metadata render --project project.kedit.json --images orig/ -o rendered/ --jobs auto
-  kzktdk metadata preview <image> --metadata page.kedit.json --id 1 --text "Hi" -o prev.jpg
-  kzktdk metadata show <json> [--id 1]   |  metadata pack <folder_rendered/> -o chapter.cbz
-  kzktdk font list / import <path> / set-default <name>
-  ```
-  Validasi: `kzktdk -h | grep -E "metadata|font|pack"` YES, `metadata --help` 7 subcommands
-- `src/main.rs:212` `MetadataCmd::Show`:
-  - `metadata show <json> [--id ID]` auto-detect via `serde_json::from_str<Project>` (cek `version==1 && !pages.is_empty()`) else `PageEditData`
-  - Project: `Project v1: 3 pages target_lang=Some("Indonesian")` + per page `load_page_metadata` bubble count ` [01] .../page00.kedit.json (1 bubbles)` `src/main.rs:1510` — tested `project.kedit.json` 1 pages, `live_batch_test/project.kedit.json` 3 pages (1/9/5 bubbles)
-  - Page: header `PageEditData v1: 01_original_page01.jpg (644x910) lang=English sig=classic — 9 bubbles` + tabel `ID | BBOX | CONF | EDIT | STYLE | TRANSLATED` (`-` = no style, `sz=22,tc=255,0,0,al=center,font=Komika`) truncated 40ch + `---` separator `src/main.rs:1525`
-  - Filter `--id 1` hanya `b.id == filter` `src/main.rs:1526`
-- `src/main.rs:212` `MetadataCmd::Pack`:
-  - `metadata pack <folder> -o out.cbz` — validasi `input.is_dir()` else `bail!`, filter `is_file && ext jpg/png/jpeg/webp`, `natord::compare` sort, `create_dir_all(parent)`, `archive::create_cbz(&files, &output)` `src/main.rs:1545`, log `Packed 3 images -> "out.cbz"` + `[01] page00.jpg` loop
-  - Error: `mkdir -p empty && pack empty -o empty.cbz` -> `No images found in "empty"` `src/main.rs:1548` — tested PASS
-  - Tested: `pack /tmp/batch_render (3 files 219K/180K/171K) -> /tmp/packed.cbz 544K` `unzip -l` `page_0001.jpg 219865, page_0002.jpg 180799, page_0003.jpg 171671` (572335 total)
-- `src/main.rs:212` `MetadataCmd::Render` batch extend:
-  - Signature `image: Option<PathBuf>, metadata: Option<PathBuf>, project: Option<PathBuf>, images: Option<PathBuf>, output: PathBuf, jobs: String` `src/main.rs:225` — backward compat single `image + --metadata` tetap `context("Missing <IMAGE> or --project")` `src/main.rs:1175`
-  - Batch path `src/main.rs:1160`: `load_project(proj_path)` `parse_jobs(jobs)` `proj_dir = proj_path.parent()`, `images_dir = images.clone()`, `create_dir_all(output)` log `[Batch Render] 3 pages jobs=2 -> "/tmp/batch_render" src/main.rs:1168`
-  - Per page loop `src/main.rs:1170`: resolve `meta_path` (absolute else `proj_dir.join(file_name)`), `load_page_metadata(meta_path)`, resolve `img_path` = `images_dir.join(data.page)` if exists else `index fallback` else `meta_path.with_file_name(data.page)` else `PathBuf::from(data.page)`; skip if `!exists` `eprintln!`
-  - Render per halaman: `image::open -> to_rgb8`, `dets = filter SKIP/empty`, `inpaint_image(&mut rgb, &dets)`, `global_typesetter = Typesetter::new(font_bytes_global, cjk_bytes)` , loop `b.style.font_family` custom `FontRegistry::resolve` -> `Typesetter::new` else `global_typesetter.render_bubble_text_with_style(.., b.style.as_ref())` `src/main.rs:1188`, save `output.join(data.page file_name)` log `Rendered "page00.jpg" -> "/tmp/batch_render/page00.jpg"` `src/main.rs:1205`
-  - font/cjk loading global once: `font.exists()? read else find_file_in_candidates` else embedded `Komika Axis` `src/main.rs:1170`
-  - Tested: `render --project live_batch_test/project.kedit.json --images live_batch_test -o /tmp/batch_render --jobs 2` -> 3 files `page00.jpg 219865 md5 4891a5ba`, `page01.jpg 180799 0ca48afa`, `page02.jpg 171671 23a793ca` `Batch render complete`; tanpa `--images` fallback sibling juga 3 files PASS; single `render 01_original_page01.jpg --metadata /tmp/test_edit.json -o /tmp/single_render.jpg` 179K PASS
-- `src/main.rs:242` `Preview` overrides extend:
-  - Tambah `font_family: Option<String>, font_size: Option<f32>, text_color: Option<String>, stroke_color: Option<String>, align: Option<String>` `src/main.rs:242` — tanpa break `preview --help` lama (args opsional)
-  - Handler `src/main.rs:1427`: `preview_style = bubble.style.clone().unwrap_or_default()`, `has_override = font_family|font_size|text_color|stroke_color|align is_some()` sebelum move, apply `if Some(ff) { style.font_family=Some(ff) }` etc. parse `R,G,B` `u8` `split(',')`, `style_opt = if has_override||bubble.style.is_some() {Some(preview_style)} else None` `src/main.rs:1441`, custom font resolve via `FontRegistry::list()` + `Typesetter::new(bytes, cjk)` fallback global
-  - Log `Preview bubble 1 -> "/tmp/prev2.jpg"` + `Preview text: "Big Red" (font_size Some(28.0), align Some("center"), font_family None)` `src/main.rs:1449`
-  - Tested: `preview --font-size 28 -o prev_override.jpg` 180K md5 `f1c7...` distinct vs plain `12c2...`, `--text-color 255,0,0 --align center` 180K md5 `47342f...` distinct PASS; tanpa override tetap 183K `prev1.jpg` PASS
-- `src/main.rs:265` `Edit` tambah 3 flag:
-  - `--bg-color "ID=R,G,B"` `Vec<String>` `src/main.rs:287`: `if val.is_empty() {b.bg_color=None} else parse 3*u8 -> Some([r,g,b])` log `Set bg_color 1 = Some([255,200,180])` `src/main.rs:1345`, json `bg_color: [10,20,30]` verified `python -c assert bg_color==[10,20,30]`
-  - `--conf "ID=0.99"` `src/main.rs:290`: `parse f32 -> clamp(0.0,1.0)` `b.conf = v` `src/main.rs:1354`, tested `conf 0.99` -> `0.990000009...` table `CONF 0.99`
-  - `--clear-style "ID"` `Vec<String>` `src/main.rs:292`: `b.style=None` log `Cleared style for 1` `src/main.rs:1358`, json `style is None` verified
-- `src/main.rs:1215` `Edit bbox` validasi bounds:
-  - `bbox` `src/main.rs:1215`: cek `x1>=x2||y1>=y2` -> `eprintln! Invalid bbox x1<x2`, cek `x2>width || y2>height` -> `eprintln! x2<=width(644) y2<=height(910) required, got [10,10,2000,2000]` `src/main.rs:1219`, `continue` tanpa `save` overwrite; `add` juga cek bounds `src/main.rs:1235` `out of bounds 644x910` + existing `x1<x2` check
-  - Tested: `--bbox "1=10,10,100,100"` `Set bbox 1 = [10,10,100,100]` PASS, `--bbox "1=10,10,2000,2000"` rejected PASS + json tetap `[10,10,100,100]` (tidak overwrite), `--add "99=10,10,2000,2000=Test"` rejected `out of bounds` PASS
-- `src/main.rs:1360` `Validate` auto-detect enhance:
-  - `read_to_string` + `try from_str<Project>` if `version==1 && !pages.is_empty()` -> print `Valid Project v1: 3 pages` + loop `[01] path` `src/main.rs:1362` return early; else parse `PageEditData` -> print `Valid PageEditData v1: 9 bubbles, page=01_original_page01.jpg (644x910) target_lang=English prompt_sig=classic` + duplicate `id` `HashSet` check `eprintln! Duplicate id`, invalid `bbox x1>=x2`, out of bounds `x2>width` `src/main.rs:1372` — tested `validate 09_translated.json` PageEditData PASS, `validate live_batch_test/project.kedit.json` Project 3 pages PASS
+- **Metadata Show & Project List**:
+  - `metadata show <json> [--id ID]` auto-detect `PageEditData` vs `project.kedit.json` — Page menampilkan tabel `ID | BBOX | CONF | EDIT | STYLE | TRANSLATED`, Project menampilkan daftar `pages` dengan bubble count.
+  - Mendukung filter `--id` untuk fokus satu bubble dan validasi `width/height` bounds di output.
+
+- **Pack to CBZ**:
+  - `metadata pack <folder> -o chapter.cbz` mengemas folder hasil `render` menjadi CBZ dengan `natural sort` (1,2,10) dan penamaan `page_0001.jpg`.
+  - Menangani folder kosong dengan pesan `No images found` yang jelas.
+
+- **Batch Render from Project**:
+  - `metadata render --project project.kedit.json --images <folder> -o rendered/ --jobs auto` merender seluruh halaman dari `project.kedit.json` tanpa LLM, dengan opsi `images` untuk override lokasi gambar asli dan `--jobs` untuk paralelisme.
+  - Mode single `metadata render <image> --metadata page.kedit.json -o out.jpg` tetap kompatibel.
+
+- **Preview Style Overrides**:
+  - `metadata preview --id 1 --text "Halo" --font-size 28 --text-color 255,0,0 --align center` memungkinkan uji gaya tanpa menyimpan JSON, cocok untuk live editor.
+  - Mendukung override `font-family`, `font-size`, `text-color`, `stroke-color`, `align`.
+
+- **Edit Enhancements**:
+  - Flag baru `--bg-color "ID=R,G,B"` dan `--conf "ID=0.99"` untuk koreksi warna background dan confidence detector.
+  - `--clear-style "ID"` menghapus seluruh style per-bubble dalam satu perintah.
+  - Validasi `bbox` kini memeriksa `x2<=width && y2<=height` serta `x1<x2`, mencegah koordinat di luar halaman.
+
+- **CLI Discoverability**:
+  - `kzktdk -h` kini menampilkan contoh `metadata` dan `font` serta daftar `Commands: translate, metadata, font`.
 
 ### Changed
-- `src/main.rs:225` `Render` signature: `image/metadata Option` + `project/images/jobs` — `cargo build` backward compat, `render <image> --metadata` tanpa `project` tetap jalan (tested single 176K), batch tanpa `--images` fallback sibling 3 files
-- `src/main.rs:242` `Preview` signature: tambah 5 `Option` override — existing call `preview --id 1 --text "Hi" -o prev.jpg` tanpa flag baru tetap 179K (tested `prev1.jpg`)
-- `src/main.rs:1360` `Validate` sebelumnya `load_page_metadata` + `load_project` try, kini `read_to_string` + `serde_json::from_str` dua kali dengan early return untuk Project — output lebih rinci `target_lang/prompt_sig` + per-bubble warnings
+- Signature `metadata render` dan `metadata preview` diperluas dengan flag opsional namun tetap backward compatible — panggilan lama tanpa flag baru tetap berjalan.
+- `metadata validate` kini auto-detect `Project` vs `PageEditData` dan memberikan peringatan untuk `duplicate id` atau `bbox out of bounds` dengan `target_lang` dan `prompt_sig` yang lebih informatif.
 
 ### Fixed
-- Help discoverability: `clap` `help` kini warnai `metadata show/pack` & `render --project` — sebelumnya `MAIN_HELP_TEMPLATE` hanya `translate` 7 baris, kini 8 contoh + `Commands: translate, metadata, font`
-
-### Tested
-- `cargo build` `Finished dev` 0.19s 2 warnings (`unused_mut bg_map` `src/main.rs:1684`, `unused variable original_name` `src/main.rs:599`)
-- Help: `kzktdk -h | grep metadata` YES, `metadata --help` 7 subcommands `export,render,preview,edit,validate,show,pack` YES, `metadata render --help` grep `project` YES, `preview --help` grep `font-size` YES, `edit --help` grep `bg-color`/`clear-style` YES — `src/main.rs:16`
-- Show: `show 09_translated.json` 12 baris include header `PageEditData v1` + `ID BBOX CONF EDIT STYLE TRANSLATED` + `Halo Sonico!` PASS; `show --id 1` 1 baris `[500,59,588,272] 0.99` PASS; `show project.kedit.json` `Project v1:1 pages` PASS; `show live_batch_test/project.kedit.json` `3 pages (1/9/5 bubbles)` PASS — `src/main.rs:1505`
-- Edit: `/tmp/test_edit.json` copy `09_translated.json` -> `--bg-color "1=10,20,30" --conf "1=0.95"` json `bg_color [10,20,30] conf 0.99` PASS; `--font-size "1=22" --text-color "1=1,2,3"` log `font_size` PASS; `--clear-style "1"` log `Cleared style` + json `style is None` PASS; `--bbox valid` PASS; `--bbox invalid 2000,2000` `x2<=width 644` rejected + json tidak overwrite PASS; `--add 99=...2000,2000` `out of bounds` PASS — `src/main.rs:1215`
-- Preview: `preview "$IMG" --metadata $TMP/edit.json --id 1 --text "Preview OK" -o a.jpg` 183142 bytes PASS; `--font-size 28 --text-color 255,0,0 --align center -o b.jpg` `font_size Some(28.0)` 180K `4601d2f` distinct vs `0ca11` `12c21c` vs `47342f` PASS — `src/main.rs:1427`
-- Render: `render --project live_batch_test/project.kedit.json --images live_batch_test -o /tmp/batch --jobs 2` 3 files `219865 4891a5ba / 180799 0ca48a / 171671 23a793` `Batch render complete` PASS; `render --project -o /tmp/batch2` tanpa `--images` 3 files PASS; `render single 01_original_page01.jpg --metadata /tmp/test_edit.json -o single.jpg` 179483 bytes `Rendered` PASS — `src/main.rs:1160`
-- Pack: `pack /tmp/batch -o /tmp/packed.cbz` `Packed 3 images -> 544K` `page_0001.jpg 219865 page_0002 180799 page_0003 171671` `Archive: 3 files 572335` PASS; `pack empty -o empty.cbz` `No images found in "empty"` PASS — `src/main.rs:1545`
-- Validate: `validate 09_translated.json` `Valid PageEditData v1:9 bubbles` PASS; `validate live_batch_test/project.kedit.json` `Valid Project v1:3 pages [01]..[03]` PASS — `src/main.rs:1360`
+- Help template sebelumnya hanya menampilkan `translate`; kini menampilkan alur editor lengkap (`export → edit → render/preview → show/pack`) sehingga pengguna menemukan fitur tanpa `grep` manual.
 
 ---
 
