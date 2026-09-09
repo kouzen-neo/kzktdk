@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use image::{Rgb, RgbImage};
+use image::{GenericImageView, Rgb, RgbImage};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 use kzktdk::archive::{self, PreparedInput};
 use kzktdk::cache::{TranslationCache, prompt_signature};
 use kzktdk::inpaint::inpaint_image;
+use kzktdk::metadata::{self, PageEditData};
 use kzktdk::model::decrypt::decrypt_model;
 use kzktdk::model::yolo::YoloModel;
 use kzktdk::translation::{CropItem, MosaicBuilder, Provider, ProviderChain, RateLimiter, build_translation_prompt, translate_with_chain};
@@ -70,17 +71,22 @@ enum Commands {
         dest: PathBuf,
     },
 
-    /// Detect speech bubbles and draw bounding boxes onto output image
-    #[command(hide = true)]
+    /// Detect speech bubbles and draw bounding boxes (supports batch folder/cbz)
     Detect {
-        /// Input image path
+        /// Input path: image, folder, or archive (cbz/zip/epub)
         input: PathBuf,
-        /// Output annotated image path
-        #[arg(short, long, default_value = "detected.png")]
-        output: PathBuf,
+        /// Output path: file for single, folder for batch
+        #[arg(short, long)]
+        output: Option<PathBuf>,
         /// ONNX model path (will auto-decrypt models/kzkt.dat if missing)
         #[arg(short, long, default_value = "models/kzkt.onnx")]
         model: PathBuf,
+        /// Export detections to JSON file
+        #[arg(long)]
+        json: Option<PathBuf>,
+        /// Jobs for batch parallel: auto or number
+        #[arg(long, default_value = "auto")]
+        jobs: String,
     },
 
     /// Inpaint/erase original text inside dialogue bubbles
@@ -171,6 +177,66 @@ Examples:
         /// Secondary / CJK font for non-Latin text (default: KosugiMaru)
         #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
         cjk_font: PathBuf,
+        /// Save metadata sidecar .kedit.json per page + project.kedit.json
+        #[arg(long)]
+        save_metadata: bool,
+        /// Custom metadata directory (default: same as output)
+        #[arg(long)]
+        metadata_dir: Option<PathBuf>,
+    },
+
+    /// Metadata operations for editor backend
+    Metadata {
+        #[command(subcommand)]
+        cmd: MetadataCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum MetadataCmd {
+    /// Export detections to JSON without LLM (cheap)
+    Export {
+        /// Input path: image, folder, or archive
+        input: PathBuf,
+        /// Output JSON file
+        #[arg(short, long)]
+        json: PathBuf,
+        /// ONNX model path
+        #[arg(short, long, default_value = "models/kzkt.onnx")]
+        model: PathBuf,
+    },
+    /// Render image from metadata JSON without LLM
+    Render {
+        /// Original image path
+        image: PathBuf,
+        /// Metadata JSON file (.kedit.json)
+        #[arg(long)]
+        metadata: PathBuf,
+        /// Output rendered image
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Font path
+        #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
+        font: PathBuf,
+        /// CJK font path
+        #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
+        cjk_font: PathBuf,
+    },
+    /// Edit metadata JSON (set translated text or bbox)
+    Edit {
+        /// Metadata JSON file
+        json: PathBuf,
+        /// Set translated text: "ID=New Text" (can repeat)
+        #[arg(long)]
+        set: Vec<String>,
+        /// Set bbox: "ID=x1,y1,x2,y2" (can repeat)
+        #[arg(long)]
+        bbox: Vec<String>,
+    },
+    /// Validate metadata JSON
+    Validate {
+        /// JSON file to validate
+        json: PathBuf,
     },
 }
 
@@ -344,40 +410,100 @@ async fn main() -> Result<()> {
             input,
             output,
             model,
+            json,
+            jobs,
         } => {
             let model_file = ensure_model(&model)?;
             println!("[1/2] Loading model from {:?}...", model_file);
             let mut yolo = YoloModel::new(&model_file)?;
+            let jobs_num = parse_jobs(&jobs);
 
-            println!("[2/2] Detecting bubbles on {:?}...", input);
-            let img = image::open(&input).with_context(|| format!("Failed to open {:?}", input))?;
-            let detections = yolo.detect_bubbles(&img)?;
-            println!("Found {} speech bubbles.", detections.len());
-
-            let mut rgb_img = img.to_rgb8();
-            for (idx, det) in detections.iter().enumerate() {
-                println!(
-                    "  Bubble #{}: [{}, {}, {}, {}] (conf: {:.2})",
-                    idx + 1,
-                    det.x1,
-                    det.y1,
-                    det.x2,
-                    det.y2,
-                    det.conf
-                );
-                draw_rect(
-                    &mut rgb_img,
-                    det.x1,
-                    det.y1,
-                    det.x2,
-                    det.y2,
-                    Rgb([255, 0, 0]),
-                    2,
-                );
+            let prepared = archive::prepare_input(&input)?;
+            match prepared {
+                PreparedInput::SingleImage(img_path) => {
+                    let out_path = output.clone().unwrap_or_else(|| PathBuf::from("detected.png"));
+                    // If output is a directory, place file inside
+                    let out_path = if out_path.is_dir() || out_path.to_string_lossy().ends_with('/') {
+                        std::fs::create_dir_all(&out_path)?;
+                        out_path.join(img_path.file_name().unwrap())
+                    } else {
+                        if let Some(parent) = out_path.parent() { std::fs::create_dir_all(parent)?; }
+                        out_path
+                    };
+                    println!("[2/2] Detecting bubbles on {:?}...", img_path);
+                    let img = image::open(&img_path).with_context(|| format!("Failed to open {:?}", img_path))?;
+                    let (w, h) = (img.width(), img.height());
+                    let detections = yolo.detect_bubbles(&img)?;
+                    println!("Found {} speech bubbles.", detections.len());
+                    let mut rgb_img = img.to_rgb8();
+                    for (idx, det) in detections.iter().enumerate() {
+                        println!("  Bubble #{}: [{}, {}, {}, {}] (conf: {:.2})", idx+1, det.x1, det.y1, det.x2, det.y2, det.conf);
+                        draw_rect(&mut rgb_img, det.x1, det.y1, det.x2, det.y2, Rgb([255,0,0]), 2);
+                    }
+                    rgb_img.save(&out_path)?;
+                    println!("Saved detection preview to {:?}", out_path);
+                    if let Some(json_path) = json {
+                        let data = metadata::PageEditData::new(
+                            img_path.file_name().unwrap().to_string_lossy().to_string(),
+                            w, h, "English".to_string(), "classic".to_string(),
+                            detections.iter().enumerate().map(|(i,d)| metadata::Bubble {
+                                id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None
+                            }).collect()
+                        );
+                        metadata::save_page_metadata(&json_path, &data)?;
+                        println!("Saved JSON to {:?}", json_path);
+                    }
+                }
+                PreparedInput::Batch { images, _temp_guard: _, is_archive: _, original_name } => {
+                    let out_dir = output.unwrap_or_else(|| PathBuf::from("detected"));
+                    std::fs::create_dir_all(&out_dir)?;
+                    println!("[2/2] Detecting bubbles on {} pages (jobs={})...", images.len(), jobs_num);
+                    let mut all_pages = Vec::new();
+                    if jobs_num <= 1 {
+                        for (idx, p) in images.iter().enumerate() {
+                            let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
+                            let (w,h) = (img.width(), img.height());
+                            let dets = yolo.detect_bubbles(&img)?;
+                            println!("[Page {}/{}] {:?}: {} bubbles", idx+1, images.len(), p.file_name().unwrap(), dets.len());
+                            let mut rgb = img.to_rgb8();
+                            for d in &dets { draw_rect(&mut rgb, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            let out = out_dir.join(p.file_name().unwrap());
+                            rgb.save(&out)?;
+                            if json.is_some() {
+                                all_pages.push(metadata::PageEditData::new(
+                                    p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
+                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None }).collect()
+                                ));
+                            }
+                        }
+                    } else {
+                        // For batch detect, sequential yolo is fine; parallel would need Send. Keep sequential for now with progress.
+                        for (idx, p) in images.iter().enumerate() {
+                            let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
+                            let (w,h) = (img.width(), img.height());
+                            let dets = yolo.detect_bubbles(&img)?;
+                            println!("[Page {}/{}] {:?}: {} bubbles", idx+1, images.len(), p.file_name().unwrap(), dets.len());
+                            let mut rgb = img.to_rgb8();
+                            for d in &dets { draw_rect(&mut rgb, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            let out = out_dir.join(p.file_name().unwrap());
+                            rgb.save(&out)?;
+                            if json.is_some() {
+                                all_pages.push(metadata::PageEditData::new(
+                                    p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
+                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None }).collect()
+                                ));
+                            }
+                        }
+                    }
+                    println!("Saved {} previews to {:?}", images.len(), out_dir);
+                    if let Some(json_path) = json {
+                        let v = serde_json::to_value(&all_pages).unwrap();
+                        std::fs::create_dir_all(json_path.parent().unwrap_or(Path::new(".")))?;
+                        std::fs::write(&json_path, serde_json::to_string_pretty(&v).unwrap())?;
+                        println!("Saved batch JSON to {:?}", json_path);
+                    }
+                }
             }
-
-            rgb_img.save(&output)?;
-            println!("Saved detection preview to {:?}", output);
         }
 
         Commands::Inpaint {
@@ -425,6 +551,8 @@ async fn main() -> Result<()> {
             claude_model,
             font,
             cjk_font,
+            save_metadata,
+            metadata_dir,
         } => {
             if clear_cache {
                 let cache = TranslationCache::open()?;
@@ -549,8 +677,19 @@ async fn main() -> Result<()> {
                         cjk_font_bytes: cjk_font_bytes.as_deref(),
                         batch_size,
                         cache: cache_opt.as_deref(),
+                        save_metadata,
+                        metadata_dir: metadata_dir.clone(),
                     };
                     translate_page(&img_path, &out_path, &mut yolo, &ctx).await?;
+
+                    // Save project.kedit.json for single image if requested
+                    if save_metadata {
+                        let meta_dir = metadata_dir.clone().unwrap_or_else(|| out_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+                        let proj = PathBuf::from(&meta_dir).join("project.kedit.json");
+                        let sidecar = meta_dir.join(format!("{}.kedit.json", out_path.file_stem().unwrap_or_default().to_string_lossy()));
+                        metadata::save_project(&proj, &[sidecar], Some(target_lang.clone()))?;
+                        println!("[Metadata] Project saved to {:?}", proj);
+                    }
 
                     println!("\n==> Success! Translated manga saved to {:?}", out_path);
                 }
@@ -607,6 +746,8 @@ async fn main() -> Result<()> {
                             cjk_font_bytes: cjk_font_bytes.as_deref(),
                             batch_size,
                             cache: cache_opt.as_deref(),
+                            save_metadata,
+                            metadata_dir: metadata_dir.clone(),
                         };
                         for (idx, file_path) in images.iter().enumerate() {
                             let file_name = file_path.file_name().unwrap();
@@ -629,6 +770,14 @@ async fn main() -> Result<()> {
                                 println!("    Saved -> {:?}", target_path);
                             }
                             translated_files.push(target_path);
+                        }
+                        if save_metadata {
+                            let meta_dir = metadata_dir.clone().unwrap_or_else(|| temp_output_dir.clone());
+                            std::fs::create_dir_all(&meta_dir)?;
+                            let sidecars: Vec<PathBuf> = translated_files.iter().map(|p| meta_dir.join(format!("{}.kedit.json", p.file_stem().unwrap_or_default().to_string_lossy()))).collect();
+                            let proj = meta_dir.join("project.kedit.json");
+                            let _ = metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
+                            println!("[Metadata] Project saved to {:?}", proj);
                         }
                         if export_as_cbz {
                             let cbz_out = if let Some(ref out) = output {
@@ -676,6 +825,8 @@ async fn main() -> Result<()> {
                         let fallback_str_c = fallback_provider.clone();
                         let rate_limit_c = rate_limit;
                         let use_cache_flag = cache_opt.is_some();
+                        let save_meta_flag = save_metadata;
+                        let meta_dir_opt = metadata_dir.clone();
 
                         for (idx, file_path) in images.iter().enumerate() {
                             let sem = semaphore.clone();
@@ -697,6 +848,8 @@ async fn main() -> Result<()> {
                             let claude_key_c = claude_key_c.clone();
                             let claude_model_c = claude_model_c.clone();
                             let fallback_str_c = fallback_str_c.clone();
+                            let save_meta_flag = save_meta_flag;
+                            let meta_dir_opt = meta_dir_opt.clone();
                             join_set.spawn(async move {
                                 let _permit = sem.acquire_owned().await.unwrap();
                                 // Rebuild chain per task (cheap)
@@ -740,6 +893,8 @@ async fn main() -> Result<()> {
                                     cjk_font_bytes: cjk_opt.as_ref().as_deref().map(|v| v as &[u8]),
                                     batch_size,
                                     cache: cache_local.as_ref(),
+                                    save_metadata: save_meta_flag,
+                                    metadata_dir: meta_dir_opt.clone(),
                                 };
                                 let res = translate_page(&file_path, &target_path, &mut yolo, &ctx).await;
                                 let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
@@ -760,6 +915,15 @@ async fn main() -> Result<()> {
                         }
                         results.sort_by_key(|(_, idx)| *idx);
                         let translated_files: Vec<PathBuf> = results.into_iter().map(|(p, _)| p).collect();
+
+                        if save_meta_flag {
+                            let meta_dir = meta_dir_opt.clone().unwrap_or_else(|| temp_output_dir.clone());
+                            std::fs::create_dir_all(&meta_dir)?;
+                            let sidecars: Vec<PathBuf> = translated_files.iter().map(|p| meta_dir.join(format!("{}.kedit.json", p.file_stem().unwrap_or_default().to_string_lossy()))).collect();
+                            let proj = meta_dir.join("project.kedit.json");
+                            let _ = metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
+                            println!("[Metadata] Project saved to {:?}", proj);
+                        }
 
                         if export_as_cbz {
                             let cbz_out = if let Some(ref out) = output {
@@ -786,6 +950,90 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Metadata { cmd } => match cmd {
+            MetadataCmd::Export { input, json, model } => {
+                let model_file = ensure_model(&model)?;
+                let mut yolo = YoloModel::new(&model_file)?;
+                let prepared = archive::prepare_input(&input)?;
+                let mut pages = Vec::new();
+                let images = match prepared {
+                    PreparedInput::SingleImage(p) => vec![p],
+                    PreparedInput::Batch { images, .. } => images,
+                };
+                for p in &images {
+                    let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
+                    let (w, h) = (img.width(), img.height());
+                    let dets = yolo.detect_bubbles(&img)?;
+                    println!("{:?}: {} bubbles", p.file_name().unwrap(), dets.len());
+                    pages.push(PageEditData::new(
+                        p.file_name().unwrap().to_string_lossy().to_string(),
+                        w, h, "English".to_string(), "classic".to_string(),
+                        dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None }).collect()
+                    ));
+                }
+                let v = serde_json::to_value(&pages).unwrap();
+                std::fs::create_dir_all(json.parent().unwrap_or(Path::new(".")))?;
+                std::fs::write(&json, serde_json::to_string_pretty(&v).unwrap())?;
+                println!("Exported {} pages to {:?}", pages.len(), json);
+            }
+            MetadataCmd::Render { image, metadata, output, font, cjk_font } => {
+                let data = metadata::load_page_metadata(&metadata)?;
+                let img = image::open(&image).with_context(|| format!("Failed to open {:?}", image))?;
+                let mut rgb = img.to_rgb8();
+                // inpaint targets where translated != SKIP
+                let dets: Vec<kzktdk::model::yolo::Detection> = data.bubbles.iter().filter(|b| b.translated.to_uppercase() != "SKIP" && !b.translated.trim().is_empty()).map(|b| kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf }).collect();
+                if !dets.is_empty() {
+                    inpaint_image(&mut rgb, &dets)?;
+                }
+                let font_bytes = if font.exists() { std::fs::read(&font)? } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") { std::fs::read(p)? } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() };
+                let cjk_bytes = if cjk_font.exists() { std::fs::read(&cjk_font).ok() } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") { std::fs::read(p).ok() } else { None };
+                let typesetter = Typesetter::new(&font_bytes, cjk_bytes.as_deref())?;
+                for b in &data.bubbles {
+                    if b.translated.to_uppercase() == "SKIP" || b.translated.trim().is_empty() { continue; }
+                    let det = kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf };
+                    typesetter.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
+                }
+                rgb.save(&output)?;
+                println!("Rendered {:?} -> {:?}", image, output);
+            }
+            MetadataCmd::Edit { json, set, bbox } => {
+                let mut data = metadata::load_page_metadata(&json)?;
+                for s in set {
+                    if let Some((id, txt)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            b.translated = txt.to_string();
+                            println!("Set {} = \"{}\"", id, txt);
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
+                    }
+                }
+                for s in bbox {
+                    if let Some((id, coords)) = s.split_once('=') {
+                        let parts: Vec<u32> = coords.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                        if parts.len() == 4 {
+                            if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                                b.bbox = [parts[0], parts[1], parts[2], parts[3]];
+                                println!("Set bbox {} = {:?}", id, b.bbox);
+                            }
+                        } else {
+                            eprintln!("Invalid bbox format for {}: expected x1,y1,x2,y2", id);
+                        }
+                    }
+                }
+                metadata::save_page_metadata(&json, &data)?;
+                println!("Saved edited metadata to {:?}", json);
+            }
+            MetadataCmd::Validate { json } => {
+                let data = metadata::load_page_metadata(&json)?;
+                println!("Valid PageEditData v{}: {} bubbles, page={} ({}x{})", data.version, data.bubbles.len(), data.page, data.width, data.height);
+                // Also try project
+                if let Ok(proj) = metadata::load_project(&json) {
+                    println!("Valid Project v{}: {} pages", proj.version, proj.pages.len());
+                }
+            }
+        }
     }
 
     Ok(())
@@ -801,6 +1049,8 @@ struct TranslationContext<'a> {
     cjk_font_bytes: Option<&'a [u8]>,
     batch_size: usize,
     cache: Option<&'a TranslationCache>,
+    save_metadata: bool,
+    metadata_dir: Option<PathBuf>,
 }
 
 async fn translate_page(
@@ -922,6 +1172,21 @@ async fn translate_page(
     }
 
     page.save(output_path)?;
+
+    // Save metadata sidecar if requested
+    if ctx.save_metadata {
+        let (w, h) = img.dimensions();
+        let page_name = input_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let mut bg_map = std::collections::HashMap::new();
+        // sample bg color not critical, leave empty; editor will compute if needed
+        let data = metadata::build_page_data(&page_name, w, h, ctx.target_lang, ctx.prompt_sig, &detections, &all_translations, &bg_map);
+        let meta_dir = ctx.metadata_dir.clone().unwrap_or_else(|| output_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        std::fs::create_dir_all(&meta_dir)?;
+        let meta_path = meta_dir.join(format!("{}.kedit.json", output_path.file_stem().unwrap_or_default().to_string_lossy()));
+        metadata::save_page_metadata(&meta_path, &data)?;
+        println!("    [Metadata] Saved to {:?}", meta_path);
+    }
+
     Ok(())
 }
 
