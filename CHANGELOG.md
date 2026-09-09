@@ -23,6 +23,45 @@ Branch: `dev-kz-debug` — `c762821`
 
 ---
 
+## [0.1.1-dev.5] - 2026-09-10
+
+Commit: `093bc28` — `feat: bubble style editing + preview (Tahap 2)`
+
+Branch: `dev-kz-debug`
+
+### Added
+- `src/metadata.rs`: `BubbleStyle {font_family,font_size,text_color,stroke_color,align}`, `Bubble {style,edited}` dengan `#[serde(default)]`
+- `src/typesetting/mod.rs`: `render_bubble_text_with_style` handle `font_size` override (clamp min/max, wrap), `text_color`/`stroke_color` override, `align` left/center/right (`line_x` logic), `font_family` via per-bubble Typesetter di `metadata render`/`preview`
+- `src/main.rs`: `metadata edit` flag `--font-size "ID=14.5"`, `--text-color "ID=R,G,B"`, `--stroke-color`, `--align`, `--edited "ID=true/false"`, subcommand `metadata preview <image> --metadata --id --text -o preview.jpg` (single bubble inpaint+render <100ms, live editor)
+
+### Tested
+- `font_size 20` + `text_color 255,0,0` + `stroke 0,0,255` + `align center` + `edited true` → validate & render 178K
+- `preview --id 1 --text "Preview Live"` → 180K single bubble, font_size override info
+- `translate --font TestKomika` global via registry → 178K
+- `font` + `metadata edit --font-family` tetap works
+
+---
+
+## [0.1.1-dev.4] - 2026-09-10
+
+Commit: `a3671f2` — `feat: font registry global+per-bubble (Tahap 1)`
+
+Branch: `dev-kz-debug`
+
+### Added
+- `src/font.rs` baru: `FontRegistry import/list/remove/resolve`, `AppConfig set/get-default` (`~/.local/share/kzktdk/fonts` + `fonts.json` + `~/.config/kzktdk/config.toml`), `FontArc` validasi, `toml 0.8`
+- `src/metadata.rs`: `BubbleStyle {font_family}`, `Bubble {style,edited}`
+- `src/typesetting/mod.rs`: per-bubble font via `FontRegistry::resolve` (custom Typesetter per bubble di `metadata render`)
+- `src/lib.rs`: `pub mod font`
+- `src/main.rs`: `font` subcommand `import/list/remove/set-default/get-default`, `translate --font` bisa `name` dari pool (bukan cuma path), `metadata edit --font-family "ID=FontName"`, `metadata render` per-bubble font override
+
+### Tested
+- `font import Komika` → `font list` → `font set-default`/`get-default`
+- `metadata edit --font-family "1=WildWords"` → `render` per-bubble
+- `translate --font TestKomika` global via registry
+
+---
+
 ## [0.1.1-dev.3] - 2026-09-10
 
 Commit: `a7f7c4e` — `feat: metadata add/delete box`
