@@ -1,0 +1,13 @@
+# Auto-normalize line endings
+* text=auto eol=lf
+
+# Language detection: ensure GitHub displays 100% Rust
+*.md linguist-documentation
+docs/** linguist-documentation
+models/** linguist-vendored
+fonts/** linguist-vendored
+Cargo.lock linguist-generated
+Cargo.toml linguist-detectable=false
+.gitignore linguist-detectable=false
+
+*.rs linguist-detectable=true

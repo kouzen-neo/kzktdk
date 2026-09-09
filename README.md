@@ -1,0 +1,238 @@
+<div align="center">
+  <img src="docs/assets/app_icon.png" width="100" alt="KZKT Logo" />
+  <h1>KZKT-DK (kzktdk)</h1>
+  <p><b>High-Performance Native Manga & Comic Translation CLI</b></p>
+  <p>A standalone command-line translation tool ported with full algorithmic fidelity from <a href="https://github.com/kouzen-neo/kzkt">KZKT Android</a>.</p>
+</div>
+
+---
+
+## Overview
+
+**kzktdk** (*KZKT Desktop Kit*) is a native, high-throughput command-line tool designed for the automated translation of manga, manhwa, manhua, and comics across Linux, macOS, and Windows.
+
+It brings the complete translation pipeline of KZKT Mobile to the desktop as a fast, standalone executable:
+
+- **Local Speech Bubble Detection**: Employs an on-device 3-stage YOLOv8 ONNX cascade model to accurately isolate speech bubbles, false-giant backgrounds, and skewed text areas.
+- **Adaptive Text Inpainting**: Isolates dialogue strokes and applies morphological dilation before Telea Fast Marching inpainting, erasing original Japanese, Korean, or Chinese text while preserving paper grain, screentones, and bubble borders.
+- **Multi-Provider LLM Translation**: Direct integration with Google Gemini, OpenAI (GPT), Anthropic (Claude), OpenRouter, or 100% offline local vision models running through Ollama.
+- **Diamond & Elliptical Typesetting**: Uses an elliptical line-budget algorithm that naturally wraps translated text inside curved manga bubbles without overflow, combined with language-aware phonetic syllable hyphenation.
+- **Batch & Comic Archive Processing**: Translates individual images (`.png`, `.jpg`, `.webp`), whole image folders, or `.cbz` / `.zip` comic books with natural alphanumeric page sorting (`1, 2, ..., 9, 10`).
+
+---
+
+## Installation
+
+### Prerequisites
+
+Ensure you have the following installed on your system:
+- **Rust toolchain** (`cargo` and `rustc`)
+- **Git**
+
+Verify installation:
+```bash
+cargo --version
+git --version
+```
+
+---
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/kouzen-neo/kzktdk.git
+cd kzktdk
+```
+
+### 2. Build and Install
+
+#### Option A: Universal Cargo Install (Linux, macOS, Windows)
+The fastest cross-platform way to build and install `kzktdk` into your system PATH:
+```bash
+cargo install --path .
+```
+This automatically compiles the release binary and installs it to your Cargo bin folder (`~/.cargo/bin` on Linux/macOS, `%USERPROFILE%\.cargo\bin` on Windows), which is already included in your PATH.
+
+---
+
+#### Option B: Manual Build & Symlink
+
+##### Linux / macOS
+```bash
+cargo build --release
+mkdir -p ~/.local/bin
+ln -sf "$PWD/target/release/kzktdk" ~/.local/bin/kzktdk
+```
+
+##### Windows (PowerShell)
+```powershell
+cargo build --release
+Copy-Item ".\target\release\kzktdk.exe" "$HOME\.cargo\bin\"
+```
+
+---
+
+### 3. Verification
+Confirm the binary is available globally:
+```bash
+kzktdk --version
+```
+
+---
+
+### Environment Variables Setup
+
+Set your API key for your chosen translation provider:
+
+#### Linux / macOS (`~/.bashrc` or `~/.zshrc`)
+```bash
+# Google Gemini (Recommended)
+export GEMINI_API_KEY="AIzaSy..."
+
+# OpenAI
+export OPENAI_API_KEY="sk-proj-..."
+
+# Anthropic Claude
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+#### Windows (PowerShell)
+```powershell
+# Current session:
+$env:GEMINI_API_KEY = "AIzaSy..."
+
+# Permanent user environment variable:
+[System.Environment]::SetEnvironmentVariable('GEMINI_API_KEY', 'AIzaSy...', 'User')
+```
+
+---
+
+## CLI Commands
+
+### Translate Comic Archive (`.cbz` / `.zip`)
+```bash
+kzktdk translate "chapter_01.cbz"
+```
+
+To translate into a specific language (e.g. Indonesian):
+```bash
+kzktdk translate "chapter_01.cbz" -t Indonesian
+```
+
+### Translate Image Directory (Batch)
+
+Translate an entire folder of scanned comic pages into an output directory with custom prompt rules:
+```bash
+kzktdk translate "./manga/chapter_01" \
+  --export folder \
+  -o "./output/chapter_01_id" \
+  -t "Indonesian" \
+  --prompt "Use a casual conversational tone suited for manga dialogue." \
+  --gemini-key "AIzaSy..."
+```
+
+Or package the translated pages directly into a single `.cbz` comic book archive:
+```bash
+kzktdk translate "./manga/chapter_01" \
+  --export cbz \
+  -o "./output/chapter_01_id.cbz" \
+  -t "Indonesian"
+```
+
+### Translate Single Image
+```bash
+kzktdk translate "page_01.jpg" -o "page_01_translated.jpg"
+```
+
+### Translate with Local Ollama (Offline)
+```bash
+kzktdk translate "chapter_01.cbz" \
+  --provider ollama \
+  --openai-base-url "http://localhost:11434/v1" \
+  --openai-model "llama3.2-vision"
+```
+
+### Translate with OpenAI or OpenRouter
+```bash
+# OpenAI
+kzktdk translate "chapter_01.cbz" \
+  --provider openai \
+  --openai-model "gpt-4o-mini"
+
+# OpenRouter
+kzktdk translate "chapter_01.cbz" \
+  --provider openai \
+  --openai-base-url "https://openrouter.ai/api/v1" \
+  --openai-model "google/gemini-flash-1.5" \
+  --openai-key "YOUR_OPENROUTER_KEY"
+```
+
+### Translate with Anthropic Claude
+```bash
+kzktdk translate "chapter_01.cbz" \
+  --provider claude \
+  --claude-model "claude-3-5-sonnet-20241022"
+```
+
+### Inspection and Preprocessing Commands
+
+#### Speech Bubble Detection (Draw Bounding Boxes)
+```bash
+kzktdk detect "page.png" -o "detected.png"
+```
+
+#### Inpaint Only (Erase Original Text)
+```bash
+kzktdk inpaint "page.png" -o "cleaned.png"
+```
+
+---
+
+## Options
+
+Usage: `kzktdk translate [OPTIONS] <INPUT>`
+
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `<INPUT>` | Path to image file (`.jpg`/`.png`/`.webp`), directory, or archive (`.cbz`/`.zip`) | *(Required)* |
+| `-o, --output <PATH>` | Output destination file, directory, or archive | Auto |
+| `--export <FORMAT>` | Batch output format: `auto`, `cbz`, or `folder` | `auto` |
+| `-t, --target-lang <LANG>` | Target language for dialogue translation | `English` |
+| `--prompt <PROMPT>` | Custom prompt instructions or additional translation rules | - |
+| `--batch-size <N>` | Number of dialogue bubbles to batch per LLM translation request | `15` |
+| `-p, --provider <PROVIDER>`| LLM provider: `gemini`, `openai`, `ollama`, or `claude` | `gemini` |
+| `--gemini-key <KEY>` | Gemini API key (or set `GEMINI_API_KEY`) | - |
+| `--gemini-model <MODEL>` | Gemini model name | `gemini-3.1-flash-lite` |
+| `--openai-key <KEY>` | OpenAI API key (or set `OPENAI_API_KEY`) | - |
+| `--openai-model <MODEL>` | OpenAI / Ollama model name | `gpt-4o-mini` |
+| `--openai-base-url <URL>` | Base URL for OpenAI-compatible endpoints | `https://api.openai.com/v1` |
+| `--claude-key <KEY>` | Anthropic Claude API key (or set `ANTHROPIC_API_KEY`) | - |
+| `--claude-model <MODEL>` | Claude model name | `claude-3-5-sonnet-20241022` |
+| `-f, --font <PATH>` | Comic font file (TTF format) | `fonts/Komika Axis.ttf` |
+| `--cjk-font <PATH>` | Font file for CJK glyph rendering | `fonts/KosugiMaru.ttf` |
+| `-m, --model <PATH>` | ONNX model file path | `models/kzkt.onnx` |
+
+---
+
+## Notes
+
+- **Natural Sorting**: Directory and archive inputs are sorted by natural alphanumeric order (`1, 2, ..., 9, 10`) rather than standard lexicographical order.
+- **Adaptive Inpainting**: Preserves bubble contours and screentone gradients by isolating the inner bubble area and dilating text edges before inpainting.
+- **Elliptical Typesetting**: Wraps text dynamically according to manga bubble geometry to avoid margin overflow.
+- **Color Inversion**: Automatically switches between dark text on light backgrounds and light text on screentone backgrounds based on localized luminance.
+
+---
+
+## Contributing & GUI Roadmap
+
+We are actively welcoming open-source contributors! Current priority areas:
+- **Interactive Touch / Canvas Editor**: Smooth pan/zoom canvas, draggable/resizable bubble boxes, manual mask brush, and live typesetting preview.
+- **Desktop GUI**: Cross-platform desktop interface (Tauri v2 / Slint / egui) with chapter queue and visual settings.
+- **Hardware Acceleration**: DirectML, CoreML, and CUDA execution providers for ONNX Runtime.
+
+Interested in contributing? Read the complete architecture and development guidelines in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## Documentation
+
+For technical architecture, mathematical formulations, and algorithmic details, see [DOCUMENTATION.md](DOCUMENTATION.md).
