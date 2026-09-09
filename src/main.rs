@@ -1510,12 +1510,14 @@ async fn translate_page(
             if text.to_uppercase() == "SKIP" || text.trim().is_empty() {
                 continue;
             }
-            typesetter.render_bubble_text(
+            // Use with_style variant (style=None for translate pipeline) for consistency with metadata render
+            typesetter.render_bubble_text_with_style(
                 &mut page,
                 det,
                 text,
                 Some(ctx.target_lang),
-                None, // Auto text & stroke colors based on bubble background
+                None,
+                None,
             );
         }
     }
