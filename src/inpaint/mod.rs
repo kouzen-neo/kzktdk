@@ -353,9 +353,22 @@ pub fn inpaint_crop(crop: &mut RgbImage) -> Result<()> {
 }
 
 /// Inpaints all detected speech bubbles in the provided image.
+/// Parallelized with rayon (like KZKT ImageInpainting.inpaintTranslated parallel coroutines).
 pub fn inpaint_image(img: &mut RgbImage, detections: &[Detection]) -> Result<()> {
+    use rayon::prelude::*;
+
     let (orig_w, orig_h) = img.dimensions();
 
+    // Extract crops + rects for parallel processing
+    struct Task {
+        x1: u32,
+        y1: u32,
+        w: u32,
+        h: u32,
+        crop: RgbImage,
+    }
+
+    let mut tasks: Vec<Task> = Vec::new();
     for det in detections {
         let x1 = det.x1.min(orig_w.saturating_sub(1));
         let y1 = det.y1.min(orig_h.saturating_sub(1));
@@ -369,21 +382,29 @@ pub fn inpaint_image(img: &mut RgbImage, detections: &[Detection]) -> Result<()>
             continue;
         }
 
-        // Crop the bubble region
         let mut crop = RgbImage::new(w, h);
         for cy in 0..h {
             for cx in 0..w {
                 crop.put_pixel(cx, cy, *img.get_pixel(x1 + cx, y1 + cy));
             }
         }
+        tasks.push(Task { x1, y1, w, h, crop });
+    }
 
-        // Inpaint the crop in place
-        inpaint_crop(&mut crop)?;
+    if tasks.is_empty() {
+        return Ok(());
+    }
 
-        // Copy clean inpainted pixels back to image
-        for cy in 0..h {
-            for cx in 0..w {
-                img.put_pixel(x1 + cx, y1 + cy, *crop.get_pixel(cx, cy));
+    // Parallel inpaint (CPU-bound)
+    tasks.par_iter_mut().for_each(|t| {
+        let _ = inpaint_crop(&mut t.crop);
+    });
+
+    // Sequential copy back (needs &mut img)
+    for t in tasks {
+        for cy in 0..t.h {
+            for cx in 0..t.w {
+                img.put_pixel(t.x1 + cx, t.y1 + cy, *t.crop.get_pixel(cx, cy));
             }
         }
     }

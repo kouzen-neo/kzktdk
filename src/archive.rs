@@ -27,9 +27,17 @@ pub fn is_image_path(path: &Path) -> bool {
     }
 }
 
+pub fn is_epub_path(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        ext.eq_ignore_ascii_case("epub")
+    } else {
+        false
+    }
+}
+
 pub fn is_archive_path(path: &Path) -> bool {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        matches!(ext.to_lowercase().as_str(), "cbz" | "zip")
+        matches!(ext.to_lowercase().as_str(), "cbz" | "zip" | "epub")
     } else {
         false
     }
@@ -59,7 +67,8 @@ fn walk_dir(dir: &Path, acc: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Extracts a CBZ or ZIP archive to a temporary directory and collects images in natural order.
+/// Extracts a CBZ/ZIP/EPUB archive to a temporary directory and collects images in natural order.
+/// For EPUB, skips META-INF and mimetype, extracts embedded images.
 pub fn extract_archive(archive_path: &Path) -> Result<(Vec<PathBuf>, TempDir)> {
     let temp_dir =
         TempDir::new().context("Failed to create temporary directory for archive extraction")?;
@@ -75,6 +84,12 @@ pub fn extract_archive(archive_path: &Path) -> Result<(Vec<PathBuf>, TempDir)> {
         let name = file.name().to_string();
 
         if file.is_dir() {
+            continue;
+        }
+
+        // EPUB: skip non-image manifest files
+        let lower = name.to_lowercase();
+        if lower.starts_with("meta-inf/") || lower == "mimetype" {
             continue;
         }
 
@@ -146,7 +161,7 @@ pub fn prepare_input(input_path: &Path) -> Result<PreparedInput> {
         Ok(PreparedInput::SingleImage(input_path.to_path_buf()))
     } else {
         bail!(
-            "Unsupported file format: {}. Expected image (.jpg, .png, .webp) or comic archive (.cbz, .zip) or a folder.",
+            "Unsupported file format: {}. Expected image (.jpg, .png, .webp) or comic archive (.cbz, .zip, .epub) or a folder.",
             input_path.display()
         );
     }
