@@ -190,6 +190,12 @@ Examples:
         #[command(subcommand)]
         cmd: MetadataCmd,
     },
+
+    /// Font registry operations
+    Font {
+        #[command(subcommand)]
+        cmd: FontCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -238,12 +244,44 @@ enum MetadataCmd {
         /// Delete bubble by ID (can repeat)
         #[arg(long)]
         delete: Vec<String>,
+        /// Set font family per bubble: "ID=FontName" (can repeat, empty to clear)
+        #[arg(long, value_name = "ID=FontName")]
+        font_family: Vec<String>,
     },
     /// Validate metadata JSON
     Validate {
         /// JSON file to validate
         json: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum FontCmd {
+    /// Import font file into registry
+    Import {
+        /// Path to TTF/OTF file
+        path: PathBuf,
+        /// Custom name (default: file stem)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List imported fonts
+    List,
+    /// Remove font from registry
+    Remove {
+        /// Font name
+        name: String,
+    },
+    /// Set default font (global)
+    SetDefault {
+        /// Font name (from registry) or path
+        name: String,
+        /// Set for CJK instead of Latin
+        #[arg(long)]
+        cjk: bool,
+    },
+    /// Get default font
+    GetDefault,
 }
 
 fn find_file_in_candidates(relative: &str) -> Option<PathBuf> {
@@ -453,7 +491,7 @@ async fn main() -> Result<()> {
                             img_path.file_name().unwrap().to_string_lossy().to_string(),
                             w, h, "English".to_string(), "classic".to_string(),
                             detections.iter().enumerate().map(|(i,d)| metadata::Bubble {
-                                id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None
+                                id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false
                             }).collect()
                         );
                         metadata::save_page_metadata(&json_path, &data)?;
@@ -478,7 +516,7 @@ async fn main() -> Result<()> {
                             if json.is_some() {
                                 all_pages.push(metadata::PageEditData::new(
                                     p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
-                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None }).collect()
+                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false }).collect()
                                 ));
                             }
                         }
@@ -496,7 +534,7 @@ async fn main() -> Result<()> {
                             if json.is_some() {
                                 all_pages.push(metadata::PageEditData::new(
                                     p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
-                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None }).collect()
+                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false }).collect()
                                 ));
                             }
                         }
@@ -571,21 +609,59 @@ async fn main() -> Result<()> {
             let model_file = ensure_model(&model)?;
 
             println!("==> Step 1: Initializing Pipeline & Model");
-            // Yolo will be wrapped for parallel batch
-            let font_bytes = if font.exists() {
-                std::fs::read(&font)?
-            } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
-                std::fs::read(p)?
-            } else {
-                include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+            // Resolve font via registry/config (global + per-bubble support)
+            let font_bytes = {
+                let font_str = font.to_string_lossy().to_string();
+                // If font is a registry name (not a file), try resolve
+                if !font.exists() && !font_str.contains('/') && !font_str.contains('\\') {
+                    if kzktdk::font::FontRegistry::resolve(&font_str).is_ok() {
+                        // Read from registry path
+                        let list = kzktdk::font::FontRegistry::list();
+                        if let Some(info) = list.iter().find(|f| f.name == font_str) {
+                            if let Ok(b) = std::fs::read(&info.path) { b } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                        } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                    } else if let Some(def) = kzktdk::font::AppConfig::get_latin() {
+                        if kzktdk::font::FontRegistry::resolve(&def).is_ok() {
+                            let list = kzktdk::font::FontRegistry::list();
+                            if let Some(info) = list.iter().find(|f| f.name == def) {
+                                if let Ok(b) = std::fs::read(&info.path) { b } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                            } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                        } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                    } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
+                        std::fs::read(p)?
+                    } else {
+                        include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                    }
+                } else if font.exists() {
+                    std::fs::read(&font)?
+                } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
+                    std::fs::read(p)?
+                } else {
+                    include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                }
             };
 
             let cjk_font_bytes = if cjk_font.exists() {
                 std::fs::read(&cjk_font).ok()
-            } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
-                std::fs::read(p).ok()
             } else {
-                None
+                let cjk_str = cjk_font.to_string_lossy().to_string();
+                if !cjk_str.is_empty() && !cjk_str.contains('/') && !cjk_str.contains('\\') && kzktdk::font::FontRegistry::resolve(&cjk_str).is_ok() {
+                    let list = kzktdk::font::FontRegistry::list();
+                    if let Some(info) = list.iter().find(|f| f.name == cjk_str) {
+                        std::fs::read(&info.path).ok()
+                    } else { None }
+                } else if let Some(def) = kzktdk::font::AppConfig::get_cjk() {
+                    let list = kzktdk::font::FontRegistry::list();
+                    if let Some(info) = list.iter().find(|f| f.name == def) {
+                        std::fs::read(&info.path).ok()
+                    } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
+                        std::fs::read(p).ok()
+                    } else { None }
+                } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
+                    std::fs::read(p).ok()
+                } else {
+                    None
+                }
             };
 
             let primary = build_provider(
@@ -975,7 +1051,7 @@ async fn main() -> Result<()> {
                     pages.push(PageEditData::new(
                         p.file_name().unwrap().to_string_lossy().to_string(),
                         w, h, "English".to_string(), "classic".to_string(),
-                        dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None }).collect()
+                        dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false }).collect()
                     ));
                 }
                 let v = serde_json::to_value(&pages).unwrap();
@@ -992,23 +1068,56 @@ async fn main() -> Result<()> {
                 if !dets.is_empty() {
                     inpaint_image(&mut rgb, &dets)?;
                 }
-                let font_bytes = if font.exists() { std::fs::read(&font)? } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") { std::fs::read(p)? } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() };
+                let font_bytes = if font.exists() { std::fs::read(&font)? } else {
+                    // Try registry name
+                    let fstr = font.to_string_lossy().to_string();
+                    if !fstr.is_empty() && kzktdk::font::FontRegistry::resolve(&fstr).is_ok() {
+                        let list = kzktdk::font::FontRegistry::list();
+                        if let Some(info) = list.iter().find(|f| f.name == fstr) {
+                            std::fs::read(&info.path).unwrap_or_else(|_| include_bytes!("../fonts/Komika Axis.ttf").to_vec())
+                        } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                    } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") { std::fs::read(p)? } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                };
                 let cjk_bytes = if cjk_font.exists() { std::fs::read(&cjk_font).ok() } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") { std::fs::read(p).ok() } else { None };
-                let typesetter = Typesetter::new(&font_bytes, cjk_bytes.as_deref())?;
+                let global_typesetter = Typesetter::new(&font_bytes, cjk_bytes.as_deref())?;
                 for b in &data.bubbles {
                     if b.translated.to_uppercase() == "SKIP" || b.translated.trim().is_empty() { continue; }
                     let det = kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf };
-                    typesetter.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
+                    // Per-bubble font override
+                    if let Some(style) = &b.style {
+                        if let Some(ref fname) = style.font_family {
+                            if let Ok(_) = kzktdk::font::FontRegistry::resolve(fname) {
+                                let list = kzktdk::font::FontRegistry::list();
+                                if let Some(info) = list.iter().find(|f| &f.name == fname) {
+                                    if let Ok(bytes) = std::fs::read(&info.path) {
+                                        if let Ok(ts) = Typesetter::new(&bytes, cjk_bytes.as_deref()) {
+                                            ts.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            } else if Path::new(fname).exists() {
+                                if let Ok(bytes) = std::fs::read(fname) {
+                                    if let Ok(ts) = Typesetter::new(&bytes, cjk_bytes.as_deref()) {
+                                        ts.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    global_typesetter.render_bubble_text(&mut rgb, &det, &b.translated, Some(&data.target_lang), None);
                 }
                 rgb.save(&output)?;
                 println!("Rendered {:?} -> {:?}", image, output);
             }
-            MetadataCmd::Edit { json, set, bbox, add, delete } => {
+            MetadataCmd::Edit { json, set, bbox, add, delete, font_family } => {
                 let mut data = metadata::load_page_metadata(&json)?;
                 for s in set {
                     if let Some((id, txt)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
                             b.translated = txt.to_string();
+                            b.edited = true;
                             println!("Set {} = \"{}\"", id, txt);
                         } else {
                             eprintln!("Bubble {} not found", id);
@@ -1059,7 +1168,7 @@ async fn main() -> Result<()> {
                             eprintln!("Invalid bbox for add {}: x1<x2 and y1<y2 required", id);
                             continue;
                         }
-                        data.bubbles.push(metadata::Bubble { id: id.to_string(), bbox: [parts[0],parts[1],parts[2],parts[3]], conf: 1.0, translated: txt.to_string(), bg_color: None });
+                        data.bubbles.push(metadata::Bubble { id: id.to_string(), bbox: [parts[0],parts[1],parts[2],parts[3]], conf: 1.0, translated: txt.to_string(), bg_color: None, style: None, edited: false });
                         println!("Added bubble {} bbox {:?} text \"{}\"", id, [parts[0],parts[1],parts[2],parts[3]], txt);
                     } else {
                         eprintln!("Invalid --add format: expected ID=x1,y1,x2,y2[=text] got '{}'", s);
@@ -1074,6 +1183,22 @@ async fn main() -> Result<()> {
                         eprintln!("Bubble {} not found for delete", id);
                     }
                 }
+                for s in font_family {
+                    if let Some((id, font)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if font.is_empty() {
+                                if let Some(style) = b.style.as_mut() { style.font_family = None; }
+                                println!("Cleared font for {}", id);
+                            } else {
+                                let style = b.style.get_or_insert_with(|| metadata::BubbleStyle { font_family: None });
+                                style.font_family = Some(font.to_string());
+                                println!("Set font {} = {}", id, font);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found for font_family", id);
+                        }
+                    }
+                }
                 metadata::save_page_metadata(&json, &data)?;
                 println!("Saved edited metadata to {:?}", json);
             }
@@ -1084,6 +1209,42 @@ async fn main() -> Result<()> {
                 if let Ok(proj) = metadata::load_project(&json) {
                     println!("Valid Project v{}: {} pages", proj.version, proj.pages.len());
                 }
+            }
+        }
+
+        Commands::Font { cmd } => match cmd {
+            FontCmd::Import { path, name } => {
+                let imported = kzktdk::font::FontRegistry::import(&path, name)?;
+                println!("Imported font '{}' from {:?}", imported, path);
+            }
+            FontCmd::List => {
+                let fonts = kzktdk::font::FontRegistry::list();
+                if fonts.is_empty() {
+                    println!("No imported fonts. Default: Komika Axis, KosugiMaru (embedded)");
+                } else {
+                    println!("Imported fonts:");
+                    for f in fonts { println!("  - {} ({} has_cjk={})", f.name, f.path, f.has_cjk); }
+                }
+                println!("Default: Komika Axis, KosugiMaru (embedded)");
+                if let Some(def) = kzktdk::font::AppConfig::get_latin() { println!("Global default latin: {}", def); }
+                if let Some(def) = kzktdk::font::AppConfig::get_cjk() { println!("Global default cjk: {}", def); }
+            }
+            FontCmd::Remove { name } => {
+                kzktdk::font::FontRegistry::remove(&name)?;
+                println!("Removed font '{}'", name);
+            }
+            FontCmd::SetDefault { name, cjk } => {
+                if cjk {
+                    kzktdk::font::AppConfig::set_cjk(&name)?;
+                    println!("Set global default CJK font to '{}'", name);
+                } else {
+                    kzktdk::font::AppConfig::set_latin(&name)?;
+                    println!("Set global default Latin font to '{}'", name);
+                }
+            }
+            FontCmd::GetDefault => {
+                if let Some(def) = kzktdk::font::AppConfig::get_latin() { println!("Global default latin: {}", def); } else { println!("Global default latin: Komika Axis (embedded)"); }
+                if let Some(def) = kzktdk::font::AppConfig::get_cjk() { println!("Global default cjk: {}", def); } else { println!("Global default cjk: KosugiMaru (embedded)"); }
             }
         }
     }

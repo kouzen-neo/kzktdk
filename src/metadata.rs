@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BubbleStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bubble {
     pub id: String,
@@ -10,6 +16,10 @@ pub struct Bubble {
     pub conf: f32,
     pub translated: String,
     pub bg_color: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<BubbleStyle>,
+    #[serde(default)]
+    pub edited: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +131,8 @@ pub fn build_page_data(
             conf: det.conf,
             translated,
             bg_color: bg,
+            style: None,
+            edited: false,
         });
     }
     PageEditData::new(
