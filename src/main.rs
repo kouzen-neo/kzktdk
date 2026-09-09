@@ -232,6 +232,12 @@ enum MetadataCmd {
         /// Set bbox: "ID=x1,y1,x2,y2" (can repeat)
         #[arg(long)]
         bbox: Vec<String>,
+        /// Add new bubble: "ID=x1,y1,x2,y2" or "ID=x1,y1,x2,y2=text" (can repeat)
+        #[arg(long)]
+        add: Vec<String>,
+        /// Delete bubble by ID (can repeat)
+        #[arg(long)]
+        delete: Vec<String>,
     },
     /// Validate metadata JSON
     Validate {
@@ -997,7 +1003,7 @@ async fn main() -> Result<()> {
                 rgb.save(&output)?;
                 println!("Rendered {:?} -> {:?}", image, output);
             }
-            MetadataCmd::Edit { json, set, bbox } => {
+            MetadataCmd::Edit { json, set, bbox, add, delete } => {
                 let mut data = metadata::load_page_metadata(&json)?;
                 for s in set {
                     if let Some((id, txt)) = s.split_once('=') {
@@ -1016,10 +1022,56 @@ async fn main() -> Result<()> {
                             if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
                                 b.bbox = [parts[0], parts[1], parts[2], parts[3]];
                                 println!("Set bbox {} = {:?}", id, b.bbox);
+                            } else {
+                                eprintln!("Bubble {} not found", id);
                             }
                         } else {
                             eprintln!("Invalid bbox format for {}: expected x1,y1,x2,y2", id);
                         }
+                    }
+                }
+                for s in add {
+                    // Format: ID=x1,y1,x2,y2 or ID=x1,y1,x2,y2=text (text may contain '=')
+                    if let Some((id, rest)) = s.split_once('=') {
+                        // Try to split rest into bbox and optional text at first '=' after bbox
+                        // bbox has 3 commas, so find position of text separator: look for pattern with 3 commas before '='
+                        let (bbox_str, txt) = if let Some(eq_pos) = rest.find('=') {
+                            let candidate_bbox = &rest[..eq_pos];
+                            let comma_cnt = candidate_bbox.matches(',').count();
+                            if comma_cnt == 3 {
+                                (&rest[..eq_pos], &rest[eq_pos+1..])
+                            } else {
+                                (rest, "")
+                            }
+                        } else {
+                            (rest, "")
+                        };
+                        if data.bubbles.iter().any(|b| b.id == id) {
+                            eprintln!("Bubble {} already exists, skip add", id);
+                            continue;
+                        }
+                        let parts: Vec<u32> = bbox_str.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                        if parts.len() != 4 {
+                            eprintln!("Invalid bbox for add {}: expected x1,y1,x2,y2", id);
+                            continue;
+                        }
+                        if parts[0] >= parts[2] || parts[1] >= parts[3] {
+                            eprintln!("Invalid bbox for add {}: x1<x2 and y1<y2 required", id);
+                            continue;
+                        }
+                        data.bubbles.push(metadata::Bubble { id: id.to_string(), bbox: [parts[0],parts[1],parts[2],parts[3]], conf: 1.0, translated: txt.to_string(), bg_color: None });
+                        println!("Added bubble {} bbox {:?} text \"{}\"", id, [parts[0],parts[1],parts[2],parts[3]], txt);
+                    } else {
+                        eprintln!("Invalid --add format: expected ID=x1,y1,x2,y2[=text] got '{}'", s);
+                    }
+                }
+                for id in delete {
+                    let before = data.bubbles.len();
+                    data.bubbles.retain(|b| b.id != id);
+                    if data.bubbles.len() < before {
+                        println!("Deleted bubble {}", id);
+                    } else {
+                        eprintln!("Bubble {} not found for delete", id);
                     }
                 }
                 metadata::save_page_metadata(&json, &data)?;
