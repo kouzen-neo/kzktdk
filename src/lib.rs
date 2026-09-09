@@ -4,5 +4,6 @@ pub mod font;
 pub mod inpaint;
 pub mod metadata;
 pub mod model;
+pub mod ocr;
 pub mod translation;
 pub mod typesetting;

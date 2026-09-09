@@ -194,6 +194,9 @@ Examples:
         /// Custom metadata directory (default: same as output)
         #[arg(long)]
         metadata_dir: Option<PathBuf>,
+        /// OCR engine: none (default), vision, local — stub for future
+        #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "vision", "local"]))]
+        ocr: String,
     },
 
     /// Metadata operations for editor backend
@@ -285,6 +288,9 @@ enum MetadataCmd {
         /// Preview override: align left|center|right
         #[arg(long, value_name = "Align")]
         align: Option<String>,
+        /// Show raw_text instead of translated when available
+        #[arg(long)]
+        show_raw: bool,
     },
     /// Edit metadata JSON (set translated text or bbox)
     Edit {
@@ -329,6 +335,21 @@ enum MetadataCmd {
         /// Clear whole style for bubble IDs (can repeat, set style=None)
         #[arg(long, value_name = "ID")]
         clear_style: Vec<String>,
+        /// Set raw OCR text: "ID=raw text" (can repeat, empty to clear)
+        #[arg(long, value_name = "ID=Text")]
+        raw_text: Vec<String>,
+        /// Find & replace across all bubbles: "old=new" (can repeat)
+        #[arg(long, value_name = "Old=New")]
+        replace: Vec<String>,
+        /// Apply style to all bubbles: "align=center,bold=true,italic=false,font_size=20,text_color=255,0,0"
+        #[arg(long, value_name = "Spec")]
+        apply_style: Option<String>,
+        /// Set bold per bubble: "ID=true/false" (can repeat, empty to clear)
+        #[arg(long, value_name = "ID=Bool")]
+        bold: Vec<String>,
+        /// Set italic per bubble: "ID=true/false" (can repeat, empty to clear)
+        #[arg(long, value_name = "ID=Bool")]
+        italic: Vec<String>,
     },
     /// Validate metadata JSON
     Validate {
@@ -589,7 +610,7 @@ async fn main() -> Result<()> {
                             img_path.file_name().unwrap().to_string_lossy().to_string(),
                             w, h, "English".to_string(), "classic".to_string(),
                             detections.iter().enumerate().map(|(i,d)| metadata::Bubble {
-                                id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false
+                                id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None
                             }).collect()
                         );
                         metadata::save_page_metadata(&json_path, &data)?;
@@ -614,7 +635,7 @@ async fn main() -> Result<()> {
                             if json.is_some() {
                                 all_pages.push(metadata::PageEditData::new(
                                     p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
-                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false }).collect()
+                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect()
                                 ));
                             }
                         }
@@ -632,7 +653,7 @@ async fn main() -> Result<()> {
                             if json.is_some() {
                                 all_pages.push(metadata::PageEditData::new(
                                     p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
-                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false }).collect()
+                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect()
                                 ));
                             }
                         }
@@ -695,12 +716,16 @@ async fn main() -> Result<()> {
             cjk_font,
             save_metadata,
             metadata_dir,
+            ocr,
         } => {
             if clear_cache {
                 let cache = TranslationCache::open()?;
                 cache.clear()?;
                 println!("[Cache] Cleared translation cache");
                 return Ok(());
+            }
+            if ocr != "none" {
+                eprintln!("[OCR] engine '{}' belum diimplementasikan, fallback none (raw_text stays None)", ocr);
             }
             let input = input.context("Missing <INPUT> path (required unless --clear-cache)")?;
 
@@ -1149,10 +1174,11 @@ async fn main() -> Result<()> {
                     pages.push(PageEditData::new(
                         p.file_name().unwrap().to_string_lossy().to_string(),
                         w, h, "English".to_string(), "classic".to_string(),
-                        dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false }).collect()
+                        dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect()
                     ));
                 }
-                let v = serde_json::to_value(&pages).unwrap();
+                // Single page -> object, multi -> array for backwards compat
+                let v = if pages.len()==1 { serde_json::to_value(&pages[0]).unwrap() } else { serde_json::to_value(&pages).unwrap() };
                 std::fs::create_dir_all(json.parent().unwrap_or(Path::new(".")))?;
                 std::fs::write(&json, serde_json::to_string_pretty(&v).unwrap())?;
                 println!("Exported {} pages to {:?}", pages.len(), json);
@@ -1264,7 +1290,7 @@ async fn main() -> Result<()> {
                     println!("Rendered {:?} -> {:?}", img_path, output);
                 }
             }
-            MetadataCmd::Edit { json, set, bbox, add, delete, font_family, font_size, text_color, stroke_color, align, edited, bg_color, conf, clear_style } => {
+            MetadataCmd::Edit { json, set, bbox, add, delete, font_family, font_size, text_color, stroke_color, align, edited, bg_color, conf, clear_style, raw_text, replace, apply_style, bold, italic } => {
                 let mut data = metadata::load_page_metadata(&json)?;
                 for s in set {
                     if let Some((id, txt)) = s.split_once('=') {
@@ -1324,7 +1350,7 @@ async fn main() -> Result<()> {
                             eprintln!("Invalid bbox for add {}: out of bounds {}x{}", id, data.width, data.height);
                             continue;
                         }
-                        data.bubbles.push(metadata::Bubble { id: id.to_string(), bbox: [parts[0],parts[1],parts[2],parts[3]], conf: 1.0, translated: txt.to_string(), bg_color: None, style: None, edited: false });
+                        data.bubbles.push(metadata::Bubble { id: id.to_string(), bbox: [parts[0],parts[1],parts[2],parts[3]], conf: 1.0, translated: txt.to_string(), bg_color: None, style: None, edited: false, raw_text: None });
                         println!("Added bubble {} bbox {:?} text \"{}\"", id, [parts[0],parts[1],parts[2],parts[3]], txt);
                     } else {
                         eprintln!("Invalid --add format: expected ID=x1,y1,x2,y2[=text] got '{}'", s);
@@ -1394,6 +1420,62 @@ async fn main() -> Result<()> {
                 for id in clear_style {
                     if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) { b.style = None; println!("Cleared style for {}", id); } else { eprintln!("Bubble {} not found for clear_style", id); }
                 }
+                for s in raw_text {
+                    if let Some((id, txt)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if txt.is_empty() { b.raw_text = None; println!("Cleared raw_text for {}", id); } else { b.raw_text = Some(txt.to_string()); println!("Set raw_text {} = \"{}\"", id, txt); }
+                        } else { eprintln!("Bubble {} not found for raw_text", id); }
+                    }
+                }
+                for rep in replace {
+                    if let Some((old, new)) = rep.split_once('=') {
+                        let mut cnt = 0;
+                        for b in data.bubbles.iter_mut() {
+                            if b.translated.contains(old) {
+                                b.translated = b.translated.replace(old, new);
+                                b.edited = true;
+                                cnt += 1;
+                            }
+                        }
+                        println!("Replace \"{}\" -> \"{}\" in {} bubbles", old, new, cnt);
+                    } else { eprintln!("Invalid --replace format: expected Old=New got '{}'", rep); }
+                }
+                if let Some(spec) = apply_style {
+                    // Spec: comma-separated key=value e.g. align=center,bold=true,font_size=20
+                    let pairs: Vec<(&str,&str)> = spec.split(',').filter_map(|p| p.split_once('=')).collect();
+                    let mut cnt = 0;
+                    for b in data.bubbles.iter_mut() {
+                        let style = b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                        for (k,v) in &pairs {
+                            match k.trim().to_lowercase().as_str() {
+                                "align" => { if v.is_empty() { style.align=None } else { style.align=Some(v.to_string()) } }
+                                "font_size" | "fontsize" | "size" => { if v.is_empty() { style.font_size=None } else if let Ok(f)=v.parse::<f32>() { style.font_size=Some(f) } }
+                                "font_family" | "font" => { if v.is_empty() { style.font_family=None } else { style.font_family=Some(v.to_string()) } }
+                                "text_color" | "tc" => { if v.is_empty() { style.text_color=None } else { let p: Vec<u8>=v.split(',').filter_map(|x| x.trim().parse().ok()).collect(); if p.len()==3 { style.text_color=Some([p[0],p[1],p[2]]) } } }
+                                "stroke_color" | "sc" => { if v.is_empty() { style.stroke_color=None } else { let p: Vec<u8>=v.split(',').filter_map(|x| x.trim().parse().ok()).collect(); if p.len()==3 { style.stroke_color=Some([p[0],p[1],p[2]]) } } }
+                                "bold" | "is_bold" => { if v.is_empty() { style.is_bold=None } else if let Ok(bv)=v.parse::<bool>() { style.is_bold=Some(bv) } }
+                                "italic" | "is_italic" => { if v.is_empty() { style.is_italic=None } else if let Ok(bv)=v.parse::<bool>() { style.is_italic=Some(bv) } }
+                                _ => {}
+                            }
+                        }
+                        cnt += 1;
+                    }
+                    println!("Apply style to {} bubbles: {}", cnt, spec);
+                }
+                for s in bold {
+                    if let Some((id, val)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if val.is_empty() { if let Some(style)=b.style.as_mut() { style.is_bold=None } println!("Cleared bold for {}", id); } else if let Ok(v)=val.parse::<bool>() { let style=b.style.get_or_insert_with(metadata::BubbleStyle::default); style.is_bold=Some(v); println!("Set bold {} = {}", id, v); } else { eprintln!("Invalid bold for {}: {}", id, val); }
+                        } else { eprintln!("Bubble {} not found", id); }
+                    }
+                }
+                for s in italic {
+                    if let Some((id, val)) = s.split_once('=') {
+                        if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                            if val.is_empty() { if let Some(style)=b.style.as_mut() { style.is_italic=None } println!("Cleared italic for {}", id); } else if let Ok(v)=val.parse::<bool>() { let style=b.style.get_or_insert_with(metadata::BubbleStyle::default); style.is_italic=Some(v); println!("Set italic {} = {}", id, v); } else { eprintln!("Invalid italic for {}: {}", id, val); }
+                        } else { eprintln!("Bubble {} not found", id); }
+                    }
+                }
                 metadata::save_page_metadata(&json, &data)?;
                 println!("Saved edited metadata to {:?}", json);
             }
@@ -1416,9 +1498,10 @@ async fn main() -> Result<()> {
                     if b.bbox[2] > data.width || b.bbox[3] > data.height { eprintln!("  [!] Bubble {} bbox out of bounds {:?} vs {}x{}", b.id, b.bbox, data.width, data.height); }
                 }
             }
-            MetadataCmd::Preview { image, metadata, id, text, output, font, cjk_font, font_family, font_size, text_color, stroke_color, align } => {
+            MetadataCmd::Preview { image, metadata, id, text, output, font, cjk_font, font_family, font_size, text_color, stroke_color, align, show_raw } => {
                 let data = metadata::load_page_metadata(&metadata)?;
                 let bubble = data.bubbles.iter().find(|b| b.id == id).cloned().context(format!("Bubble {} not found", id))?;
+                let display_text = if show_raw { bubble.raw_text.clone().unwrap_or(text.clone()) } else { text.clone() };
                 let mut rgb = image::open(&image).with_context(|| format!("Failed to open {:?}", image))?.to_rgb8();
                 let det = kzktdk::model::yolo::Detection { x1: bubble.bbox[0], y1: bubble.bbox[1], x2: bubble.bbox[2], y2: bubble.bbox[3], conf: bubble.conf };
                 inpaint_image(&mut rgb, &[det.clone()])?;
@@ -1446,11 +1529,11 @@ async fn main() -> Result<()> {
                 } else {
                     Typesetter::new(&font_bytes, cjk_bytes.as_deref())?
                 };
-                typesetter.render_bubble_text_with_style(&mut rgb, &det, &text, Some(&data.target_lang), None, style_opt.as_ref());
+                typesetter.render_bubble_text_with_style(&mut rgb, &det, &display_text, Some(&data.target_lang), None, style_opt.as_ref());
                 if let Some(parent) = output.parent() { std::fs::create_dir_all(parent)?; }
                 rgb.save(&output)?;
                 println!("Preview bubble {} -> {:?}", id, output);
-                println!("Preview text: \"{}\" (font_size {:?}, align {:?}, font_family {:?})", text, style_opt.as_ref().and_then(|s| s.font_size), style_opt.as_ref().and_then(|s| s.align.as_ref()), style_opt.as_ref().and_then(|s| s.font_family.as_ref()));
+                println!("Preview text: \"{}\" (font_size {:?}, align {:?}, font_family {:?}) show_raw={}", display_text, style_opt.as_ref().and_then(|s| s.font_size), style_opt.as_ref().and_then(|s| s.align.as_ref()), style_opt.as_ref().and_then(|s| s.font_family.as_ref()), show_raw);
             }
             MetadataCmd::Show { json, id } => {
                 let content = std::fs::read_to_string(&json).with_context(|| format!("Failed to read {:?}", json))?;
@@ -1469,9 +1552,9 @@ async fn main() -> Result<()> {
                     }
                 }
                 let data = metadata::load_page_metadata(&json)?;
-                println!("PageEditData v{}: {} ({}x{}) lang={} sig={} — {} bubbles", data.version, data.page, data.width, data.height, data.target_lang, data.prompt_sig, data.bubbles.len());
-                println!("{:<4} {:<18} {:<5} {:<6} {:<20} {}", "ID", "BBOX", "CONF", "EDIT", "STYLE", "TRANSLATED");
-                println!("{}", "-".repeat(110));
+                println!("PageEditData v{}: {} ({}x{}) lang={} sig={} ocr={:?} — {} bubbles", data.version, data.page, data.width, data.height, data.target_lang, data.prompt_sig, data.ocr_engine, data.bubbles.len());
+                println!("{:<4} {:<18} {:<5} {:<6} {:<22} {:<12} {}", "ID", "BBOX", "CONF", "EDIT", "STYLE", "RAW", "TRANSLATED");
+                println!("{}", "-".repeat(130));
                 for b in &data.bubbles {
                     if let Some(ref filter) = id { if &b.id != filter { continue; } }
                     let style_str = if let Some(s) = &b.style {
@@ -1481,11 +1564,20 @@ async fn main() -> Result<()> {
                         if let Some(c) = s.text_color { parts.push(format!("tc={},{},{}", c[0],c[1],c[2])); }
                         if let Some(c) = s.stroke_color { parts.push(format!("sc={},{},{}", c[0],c[1],c[2])); }
                         if let Some(a) = &s.align { parts.push(format!("al={}", a)); }
+                        if let Some(v) = s.is_bold { parts.push(format!("b={}", v)); }
+                        if let Some(v) = s.is_italic { parts.push(format!("i={}", v)); }
                         parts.join(",")
                     } else { "-".to_string() };
-                    let t = if b.translated.len()>40 { format!("{}...", &b.translated[..40]) } else { b.translated.clone() };
+                    let t: String = {
+                        let ch: Vec<char> = b.translated.chars().collect();
+                        if ch.len()>30 { ch[..30].iter().collect::<String>() + "..." } else { b.translated.clone() }
+                    };
+                    let raw = if let Some(r) = &b.raw_text {
+                        let ch: Vec<char> = r.chars().collect();
+                        if ch.len()>10 { ch[..10].iter().collect::<String>() + "..." } else { r.clone() }
+                    } else { "-".to_string() };
                     let bbox = format!("[{},{},{},{}]", b.bbox[0],b.bbox[1],b.bbox[2],b.bbox[3]);
-                    println!("{:<4} {:<18} {:<5.2} {:<6} {:<20} {}", b.id, bbox, b.conf, b.edited, style_str, t.replace('\n'," "));
+                    println!("{:<4} {:<18} {:<5.2} {:<6} {:<22} {:<12} {}", b.id, bbox, b.conf, b.edited, style_str, raw.replace('\n'," "), t.replace('\n'," "));
                 }
             }
             MetadataCmd::Pack { input, output } => {

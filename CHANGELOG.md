@@ -14,6 +14,34 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.1.1-dev.12] - 2026-09-10
+
+Commit: `f9af774` — `feat: ocr prep — raw_text, bold/italic, batch style, backup`
+
+Branch: `dev-kz-debug`
+
+### Added
+- **OCR Prep — Raw Text & Stub Engine**:
+  - Menambah `Bubble.raw_text` dan `PageEditData/Project.ocr_engine` (`Option<String>`) dengan `serde default` agar JSON lama tetap load.
+  - Modul `src/ocr.rs` `trait OcrEngine` + `NoopOcr` stub — pipeline tetap Vision-only, `raw_text` tetap `None` sampai engine dipilih.
+  - Flag `translate --ocr <none|vision|local>` (dummy, log fallback none) dan `metadata edit --raw-text "ID=text"` + `preview --show-raw` untuk menampilkan `raw_text` tanpa save.
+  - `metadata show` kolom `RAW` dan `ocr` di header, handling unicode `chars()` aman untuk Jepang.
+
+- **Bold / Italic & Batch Style**:
+  - `BubbleStyle { is_bold, is_italic }` + flag `metadata edit --bold/--italic "ID=true"` dan `--apply-style "align=center,bold=true,font_size=20"` ke semua bubble.
+  - `--replace "old=new"` find & replace ke seluruh `translated` dengan `edited=true`.
+
+- **Backup Lightweight Undo**:
+  - `atomic_write_json` kini simpan `.kedit.json.bak.<ts>` sebelum overwrite, keep 3 terbaru — ganti `undo` GUI `kzkt` tanpa history in-memory.
+
+### Changed
+- `metadata export` single page tulis object (bukan array) agar `load_page_metadata` kompatibel; multi-page tetap array.
+
+### Fixed
+- `metadata show` panic pada `raw_text` unicode (slice byte `..10` → `chars().take(10)`).
+
+---
+
 ## [0.1.1-dev.11] - 2026-09-10
 
 Commit: `29823a9` — `feat: CLI editor final (pack/show/preview override/edit bg)`
