@@ -16,7 +16,7 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [0.1.1-dev.13] - 2026-09-10
 
-Commit: `a8352ed` — `feat: freetext outside bubbles + rapid ort real (vision/ft, auto-download, Indo proof)`
+Commit: `f2a4ca3` — `feat: freetext outside bubbles + rapid ort real (vision/ft, auto-download, Indo proof)`
 
 Branch: `dev-kz-debug`
 
