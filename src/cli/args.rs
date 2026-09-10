@@ -66,9 +66,9 @@ pub enum Commands {
     /// Decrypt the bundled/custom model (.dat -> .onnx)
     #[command(hide = true)]
     DecryptModel {
-        #[arg(short, long, default_value = "models/kzkt.dat")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_DAT_PATH)]
         source: PathBuf,
-        #[arg(short, long, default_value = "models/kzkt.onnx")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_PATH)]
         dest: PathBuf,
     },
 
@@ -80,13 +80,13 @@ pub enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// ONNX model path (will auto-decrypt models/kzkt.dat if missing)
-        #[arg(short, long, default_value = "models/kzkt.onnx")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_PATH)]
         model: PathBuf,
         /// Export detections to JSON file
         #[arg(long)]
         json: Option<PathBuf>,
         /// Jobs for batch parallel: auto or number
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_JOBS.to_string())]
         jobs: String,
         /// Also detect freetext outside bubbles (requires --ocr)
         #[arg(long, default_value_t = false)]
@@ -114,10 +114,10 @@ pub enum Commands {
         /// Input image path
         input: PathBuf,
         /// Output inpainted image path
-        #[arg(short, long, default_value = "inpainted.png")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_INPAINT_OUTPUT)]
         output: PathBuf,
         /// ONNX model path
-        #[arg(short, long, default_value = "models/kzkt.onnx")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_PATH)]
         model: PathBuf,
     },
 
@@ -140,28 +140,28 @@ Examples:
         #[arg(long, default_value = "auto")]
         export: String,
         /// ONNX model path
-        #[arg(short, long, default_value = "models/kzkt.onnx")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_PATH)]
         model: PathBuf,
         /// Target translation language
-        #[arg(short, long, default_value = "English")]
+        #[arg(short, long, default_value_t = kzktdk::config::DEFAULT_TARGET_LANG.to_string())]
         target_lang: String,
         /// Custom prompt instructions or additional translation rules
         #[arg(long)]
         prompt: Option<String>,
         /// Number of dialogue bubbles to batch per LLM translation request
-        #[arg(long, default_value = "15")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_CLI_BATCH_SIZE)]
         batch_size: usize,
         /// LLM Provider: gemini, openai, ollama, or claude
-        #[arg(short, long, default_value = "gemini")]
+        #[arg(short, long, default_value_t = kzktdk::config::DEFAULT_PROVIDER.to_string())]
         provider: String,
         /// Fallback providers comma-separated (e.g. openai,claude)
         #[arg(long)]
         fallback_provider: Option<String>,
         /// Rate limit RPS
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_RATE_LIMIT_RPS)]
         rate_limit: u32,
         /// Jobs for batch parallel: auto or number (default auto = num_cpus)
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_JOBS.to_string())]
         jobs: String,
         /// Disable translation cache
         #[arg(long)]
@@ -176,25 +176,25 @@ Examples:
         #[arg(long, env = "OPENAI_API_KEY")]
         openai_key: Option<String>,
         /// OpenAI base URL (use for Ollama e.g. http://localhost:11434/v1)
-        #[arg(long, default_value = "https://api.openai.com/v1")]
+        #[arg(long, default_value_t = kzktdk::config::OPENAI_DEFAULT_BASE_URL.to_string())]
         openai_base_url: String,
         /// Model name for OpenAI / Ollama
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_OPENAI_MODEL.to_string())]
         openai_model: String,
         /// Model name for Gemini
-        #[arg(long, default_value = "gemini-3.1-flash-lite")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_GEMINI_MODEL.to_string())]
         gemini_model: String,
         /// Claude API Key (or set ANTHROPIC_API_KEY env var)
         #[arg(long, env = "ANTHROPIC_API_KEY")]
         claude_key: Option<String>,
         /// Model name for Claude
-        #[arg(long, default_value = "claude-3-5-sonnet-20241022")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_CLAUDE_MODEL.to_string())]
         claude_model: String,
         /// Primary comic font (default: Komika Axis like KZKT mobile)
-        #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_FONT_PATH)]
         font: PathBuf,
         /// Secondary / CJK font for non-Latin text (default: KosugiMaru)
-        #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
+        #[arg(long, default_value = kzktdk::config::DEFAULT_CJK_FONT_PATH)]
         cjk_font: PathBuf,
         /// Save metadata sidecar .kedit.json per page + project.kedit.json
         #[arg(long)]
@@ -257,7 +257,7 @@ pub enum MetadataCmd {
         #[arg(short, long)]
         json: PathBuf,
         /// ONNX model path
-        #[arg(short, long, default_value = "models/kzkt.onnx")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_PATH)]
         model: PathBuf,
         /// Initial reading order from bubble geometry: r2l (manga), l2r (western), off
         #[arg(long, default_value = "r2l", value_parser = clap::builder::PossibleValuesParser::new(["r2l", "l2r", "off"]))]
@@ -280,13 +280,13 @@ pub enum MetadataCmd {
         #[arg(short, long)]
         output: PathBuf,
         /// Font path
-        #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_FONT_PATH)]
         font: PathBuf,
         /// CJK font path
-        #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
+        #[arg(long, default_value = kzktdk::config::DEFAULT_CJK_FONT_PATH)]
         cjk_font: PathBuf,
         /// Jobs for batch render (auto or N)
-        #[arg(long, default_value = "auto")]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_JOBS.to_string())]
         jobs: String,
         /// Progress output: text or jsonl (JSON lines to stderr)
         #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "jsonl"]))]
@@ -318,10 +318,10 @@ pub enum MetadataCmd {
         #[arg(long, default_value_t = 0)]
         thumb: u32,
         /// Font path
-        #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_FONT_PATH)]
         font: PathBuf,
         /// CJK font path
-        #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
+        #[arg(long, default_value = kzktdk::config::DEFAULT_CJK_FONT_PATH)]
         cjk_font: PathBuf,
         /// Preview override: font family (without saving)
         #[arg(long, value_name = "FontName")]
@@ -475,13 +475,13 @@ pub enum MetadataCmd {
         #[arg(short, long)]
         output: PathBuf,
         /// Font path
-        #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
+        #[arg(short, long, default_value = kzktdk::config::DEFAULT_FONT_PATH)]
         font: PathBuf,
         /// CJK font path
-        #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
+        #[arg(long, default_value = kzktdk::config::DEFAULT_CJK_FONT_PATH)]
         cjk_font: PathBuf,
         /// Poll interval in seconds
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = kzktdk::config::DEFAULT_WATCH_INTERVAL_SECS)]
         interval: u64,
         /// Render once and exit (for scripts/tests)
         #[arg(long, default_value_t = false)]

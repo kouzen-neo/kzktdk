@@ -60,11 +60,11 @@ pub fn ensure_model(model_path: &Path) -> Result<PathBuf> {
         return Ok(model_path.to_path_buf());
     }
 
-    if let Some(onnx) = find_file_in_candidates("models/kzkt.onnx") {
+    if let Some(onnx) = find_file_in_candidates(kzktdk::config::DEFAULT_MODEL_PATH) {
         return Ok(onnx);
     }
 
-    if let Some(dat) = find_file_in_candidates("models/kzkt.dat") {
+    if let Some(dat) = find_file_in_candidates(kzktdk::config::DEFAULT_MODEL_DAT_PATH) {
         println!(
             "[Info] ONNX model not found at {:?}. Auto-decrypting from {:?}...",
             model_path, dat
@@ -83,13 +83,13 @@ pub fn parse_jobs(jobs_str: &str) -> usize {
     if jobs_str.eq_ignore_ascii_case("auto") {
         std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(4)
+            .unwrap_or(kzktdk::config::DEFAULT_JOBS_FALLBACK)
     } else if let Ok(n) = jobs_str.parse::<usize>() {
         n.max(1)
     } else {
         std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(4)
+            .unwrap_or(kzktdk::config::DEFAULT_JOBS_FALLBACK)
     }
 }
 

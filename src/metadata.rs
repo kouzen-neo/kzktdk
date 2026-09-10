@@ -187,7 +187,7 @@ fn acquire_lock(path: &Path) -> Result<PathBuf> {
     } else {
         lock
     };
-    for _ in 0..50 {
+    for _ in 0..crate::config::METADATA_LOCK_SPIN_ATTEMPTS {
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -195,7 +195,9 @@ fn acquire_lock(path: &Path) -> Result<PathBuf> {
         {
             Ok(_) => return Ok(lock),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::config::METADATA_LOCK_POLL_MS,
+                ));
                 continue;
             }
             Err(e) => {

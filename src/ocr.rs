@@ -456,11 +456,9 @@ fn ensure_rapid_cached(custom_path: Option<&Path>) -> Option<(PathBuf, PathBuf, 
     let need_dl = !det.exists() || !rec.exists() || !dict.exists();
     if need_dl {
         let _ = std::fs::create_dir_all(&dir);
-        let det_url =
-            "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_PP-OCRv3_det_infer.onnx";
-        let rec_url =
-            "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/japan_rec_crnn.onnx";
-        let dict_url = "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/japan_dict.txt";
+        let det_url = crate::config::RAPIDOCR_DET_URL;
+        let rec_url = crate::config::RAPIDOCR_REC_URL;
+        let dict_url = crate::config::PADDLE_JAPAN_DICT_URL;
         let ok_det = download_file(det_url, &det);
         let ok_rec = download_file(rec_url, &rec);
         let ok_dict = download_file(dict_url, &dict);

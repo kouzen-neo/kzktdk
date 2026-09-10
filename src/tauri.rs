@@ -91,7 +91,7 @@ impl Default for TranslateConfig {
             gemini_key: None,
             gemini_model: "gemini-2.5-flash".to_string(),
             openai_key: None,
-            openai_base_url: "https://api.openai.com/v1".to_string(),
+            openai_base_url: crate::config::OPENAI_DEFAULT_BASE_URL.to_string(),
             openai_model: "gpt-4o-mini".to_string(),
             claude_key: None,
             claude_model: "claude-sonnet-4-5".to_string(),

@@ -28,7 +28,8 @@ fn iou(a: [u32; 4], b: [u32; 4]) -> f32 {
     if union <= 0.0 { 0.0 } else { inter / union }
 }
 
-/// Merge nearby boxes with gap threshold 20px (port ImageProcessor.mergeNearbyTextBoxes)
+/// Merge nearby boxes with a gap threshold (see `MERGE_NEARBY_GAP_PX`;
+/// port ImageProcessor.mergeNearbyTextBoxes)
 pub fn merge_nearby_text_boxes(mut boxes: Vec<[u32; 4]>, gap: u32) -> Vec<[u32; 4]> {
     if boxes.is_empty() {
         return boxes;
@@ -158,7 +159,7 @@ pub fn detect_free_text(
         out.push(bbox);
     }
 
-    merge_nearby_text_boxes(out, 20)
+    merge_nearby_text_boxes(out, crate::config::MERGE_NEARBY_GAP_PX)
 }
 
 /// Helper to produce padded crop for freetext (6% pad) and bubble crops consistency
