@@ -13,6 +13,34 @@ pub fn file_name(path: &Path) -> Result<&std::ffi::OsStr> {
         .with_context(|| format!("Path has no file name: {}", path.display()))
 }
 
+/// Load a required (latin) font: explicit file → candidate files → embedded.
+///
+/// Shared shape of the per-command font chains. Candidate read errors
+/// propagate (`?`), matching the historical behavior.
+pub fn load_font_bytes(
+    query: impl AsRef<Path>,
+    candidate: &str,
+    embedded: &[u8],
+) -> Result<Vec<u8>> {
+    let query = query.as_ref();
+    if query.exists() {
+        return Ok(std::fs::read(query)?);
+    }
+    if let Some(p) = find_file_in_candidates(candidate) {
+        return Ok(std::fs::read(&p)?);
+    }
+    Ok(embedded.to_vec())
+}
+
+/// Best-effort (CJK) variant of [`load_font_bytes`]: failures yield `None`.
+pub fn load_cjk_bytes(query: impl AsRef<Path>, candidate: &str) -> Option<Vec<u8>> {
+    let query = query.as_ref();
+    if query.exists() {
+        return std::fs::read(query).ok();
+    }
+    find_file_in_candidates(candidate).and_then(|p| std::fs::read(p).ok())
+}
+
 pub fn find_file_in_candidates(relative: &str) -> Option<PathBuf> {
     let direct = Path::new(relative);
     if direct.exists() {

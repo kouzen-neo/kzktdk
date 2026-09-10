@@ -13,7 +13,7 @@ use kzktdk::model::yolo::YoloModel;
 use kzktdk::pipeline::{TranslationContext, build_provider, translate_page};
 use kzktdk::translation::{ProviderChain, RateLimiter};
 
-use super::util::{ensure_model, find_file_in_candidates, parse_jobs};
+use super::util::{ensure_model, parse_jobs};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -94,49 +94,36 @@ pub async fn run(
     let model_file = ensure_model(&model)?;
 
     tinfo!("==> Step 1: Initializing Pipeline & Model");
-    // Resolve font via registry/config (global + per-bubble support)
+    // Resolve font via registry/config (global + per-bubble support).
+    // Chain (historical order): registry name → AppConfig default →
+    // candidate files → embedded. NOTE: if a name resolves in the registry
+    // but its file is unreadable, the chain now continues to the AppConfig
+    // default instead of jumping straight to embedded (old TOCTOU edge;
+    // both outcomes yield a working font, no test covers the race).
     let font_bytes = {
         let font_str = font.to_string_lossy().to_string();
-        // If font is a registry name (not a file), try resolve
         if !font.exists() && !font_str.contains('/') && !font_str.contains('\\') {
-            if kzktdk::font::FontRegistry::resolve(&font_str).is_ok() {
-                // Read from registry path
-                let list = kzktdk::font::FontRegistry::list();
-                if let Some(info) = list.iter().find(|f| f.name == font_str) {
-                    if let Ok(b) = std::fs::read(&info.path) {
-                        b
-                    } else {
-                        include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                    }
-                } else {
-                    include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                }
-            } else if let Some(def) = kzktdk::font::AppConfig::get_latin() {
-                if kzktdk::font::FontRegistry::resolve(&def).is_ok() {
-                    let list = kzktdk::font::FontRegistry::list();
-                    if let Some(info) = list.iter().find(|f| f.name == def) {
-                        if let Ok(b) = std::fs::read(&info.path) {
-                            b
-                        } else {
-                            include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                        }
-                    } else {
-                        include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                    }
-                } else {
-                    include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                }
-            } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
-                std::fs::read(p)?
+            if let Some(b) =
+                kzktdk::font::FontRegistry::read_registry_font(&font_str).or_else(|| {
+                    kzktdk::font::AppConfig::get_latin()
+                        .as_deref()
+                        .and_then(kzktdk::font::FontRegistry::read_registry_font)
+                })
+            {
+                b
             } else {
-                include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
+                super::util::load_font_bytes(
+                    &font,
+                    kzktdk::config::DEFAULT_FONT_PATH,
+                    include_bytes!("../../fonts/Komika Axis.ttf"),
+                )?
             }
-        } else if font.exists() {
-            std::fs::read(&font)?
-        } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
-            std::fs::read(p)?
         } else {
-            include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
+            super::util::load_font_bytes(
+                &font,
+                kzktdk::config::DEFAULT_FONT_PATH,
+                include_bytes!("../../fonts/Komika Axis.ttf"),
+            )?
         }
     };
 
@@ -144,30 +131,18 @@ pub async fn run(
         std::fs::read(&cjk_font).ok()
     } else {
         let cjk_str = cjk_font.to_string_lossy().to_string();
-        if !cjk_str.is_empty()
-            && !cjk_str.contains('/')
-            && !cjk_str.contains('\\')
-            && kzktdk::font::FontRegistry::resolve(&cjk_str).is_ok()
-        {
-            let list = kzktdk::font::FontRegistry::list();
-            if let Some(info) = list.iter().find(|f| f.name == cjk_str) {
-                std::fs::read(&info.path).ok()
-            } else {
-                None
-            }
-        } else if let Some(def) = kzktdk::font::AppConfig::get_cjk() {
-            let list = kzktdk::font::FontRegistry::list();
-            if let Some(info) = list.iter().find(|f| f.name == def) {
-                std::fs::read(&info.path).ok()
-            } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
-                std::fs::read(p).ok()
-            } else {
-                None
-            }
-        } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
-            std::fs::read(p).ok()
+        if !cjk_str.is_empty() && !cjk_str.contains('/') && !cjk_str.contains('\\') {
+            kzktdk::font::FontRegistry::read_registry_font(&cjk_str)
+                .or_else(|| {
+                    kzktdk::font::AppConfig::get_cjk()
+                        .as_deref()
+                        .and_then(kzktdk::font::FontRegistry::read_registry_font)
+                })
+                .or_else(|| {
+                    super::util::load_cjk_bytes(&cjk_font, kzktdk::config::DEFAULT_CJK_FONT_PATH)
+                })
         } else {
-            None
+            super::util::load_cjk_bytes(&cjk_font, kzktdk::config::DEFAULT_CJK_FONT_PATH)
         }
     };
 

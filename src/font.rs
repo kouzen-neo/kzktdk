@@ -154,6 +154,22 @@ impl FontRegistry {
         );
     }
 
+    /// Read a registry-listed font by name, returning raw bytes.
+    ///
+    /// Returns `None` when the name does not resolve to a readable registry
+    /// font; callers continue their own fallback chain (AppConfig default,
+    /// candidate files, embedded). This is the shared shape of the
+    /// resolve→list→find→read blocks that used to be copied per call site.
+    pub fn read_registry_font(name: &str) -> Option<Vec<u8>> {
+        if Self::resolve(name).is_ok() {
+            let list = Self::list();
+            if let Some(info) = list.iter().find(|f| f.name == name) {
+                return std::fs::read(&info.path).ok();
+            }
+        }
+        None
+    }
+
     fn load_registry() -> FontRegistryFile {
         let path = registry_path();
         if let Ok(file) = std::fs::File::open(&path) {

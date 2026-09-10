@@ -7,7 +7,7 @@ use kzktdk::metadata::{self, PageEditData};
 use kzktdk::model::yolo::YoloModel;
 
 use super::args::MetadataCmd;
-use super::util::{ensure_model, file_name, find_file_in_candidates, parse_jobs};
+use super::util::{ensure_model, file_name, load_cjk_bytes, load_font_bytes, parse_jobs};
 
 pub async fn run(cmd: MetadataCmd) -> Result<()> {
     match cmd {
@@ -114,20 +114,13 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                     jobs_num,
                     output
                 );
-                let font_bytes_global = if font.exists() {
-                    std::fs::read(font)?
-                } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
-                    std::fs::read(p)?
-                } else {
-                    include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                };
-                let cjk_bytes_global = if cjk_font.exists() {
-                    std::fs::read(&cjk_font).ok()
-                } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
-                    std::fs::read(p).ok()
-                } else {
-                    None
-                };
+                let font_bytes_global = load_font_bytes(
+                    font,
+                    kzktdk::config::DEFAULT_FONT_PATH,
+                    include_bytes!("../../fonts/Komika Axis.ttf"),
+                )?;
+                let cjk_bytes_global =
+                    load_cjk_bytes(cjk_font, kzktdk::config::DEFAULT_CJK_FONT_PATH);
                 let session =
                     kzktdk::editor::EditorSession::new(font_bytes_global, cjk_bytes_global)?;
                 for (idx, page_meta_str) in proj.pages.iter().enumerate() {
@@ -237,29 +230,21 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                 let font_bytes_single = if font.exists() {
                     std::fs::read(&font)?
                 } else {
+                    // Registry hit wins; otherwise the standard chain
+                    // (candidate files → embedded). Candidate read errors
+                    // still propagate, as before.
                     let fstr = font.to_string_lossy().to_string();
-                    if !fstr.is_empty() && kzktdk::font::FontRegistry::resolve(&fstr).is_ok() {
-                        let list = kzktdk::font::FontRegistry::list();
-                        if let Some(info) = list.iter().find(|f| f.name == fstr) {
-                            std::fs::read(&info.path).unwrap_or_else(|_| {
-                                include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                            })
-                        } else {
-                            include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-                        }
-                    } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
-                        std::fs::read(p)?
-                    } else {
-                        include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
+                    match kzktdk::font::FontRegistry::read_registry_font(&fstr) {
+                        Some(b) => b,
+                        None => load_font_bytes(
+                            font,
+                            kzktdk::config::DEFAULT_FONT_PATH,
+                            include_bytes!("../../fonts/Komika Axis.ttf"),
+                        )?,
                     }
                 };
-                let cjk_bytes_single = if cjk_font.exists() {
-                    std::fs::read(&cjk_font).ok()
-                } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
-                    std::fs::read(p).ok()
-                } else {
-                    None
-                };
+                let cjk_bytes_single =
+                    load_cjk_bytes(cjk_font, kzktdk::config::DEFAULT_CJK_FONT_PATH);
                 let session_single =
                     kzktdk::editor::EditorSession::new(font_bytes_single, cjk_bytes_single)?;
                 let rgb = session_single.render_page(&img.to_rgb8(), &data)?;
@@ -965,20 +950,12 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
             let rgb_in = image::open(&image)
                 .with_context(|| format!("Failed to open {:?}", image))?
                 .to_rgb8();
-            let font_bytes = if font.exists() {
-                std::fs::read(&font)?
-            } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
-                std::fs::read(p)?
-            } else {
-                include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-            };
-            let cjk_bytes = if cjk_font.exists() {
-                std::fs::read(&cjk_font).ok()
-            } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
-                std::fs::read(p).ok()
-            } else {
-                None
-            };
+            let font_bytes = load_font_bytes(
+                font,
+                kzktdk::config::DEFAULT_FONT_PATH,
+                include_bytes!("../../fonts/Komika Axis.ttf"),
+            )?;
+            let cjk_bytes = load_cjk_bytes(cjk_font, kzktdk::config::DEFAULT_CJK_FONT_PATH);
             let mut preview_style = bubble.style.clone().unwrap_or_default();
             let has_override = font_family.is_some()
                 || font_size.is_some()
@@ -1333,20 +1310,12 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
             interval,
             once,
         } => {
-            let font_bytes_global = if font.exists() {
-                std::fs::read(&font)?
-            } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
-                std::fs::read(p)?
-            } else {
-                include_bytes!("../../fonts/Komika Axis.ttf").to_vec()
-            };
-            let cjk_bytes_global = if cjk_font.exists() {
-                std::fs::read(&cjk_font).ok()
-            } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
-                std::fs::read(p).ok()
-            } else {
-                None
-            };
+            let font_bytes_global = load_font_bytes(
+                font,
+                kzktdk::config::DEFAULT_FONT_PATH,
+                include_bytes!("../../fonts/Komika Axis.ttf"),
+            )?;
+            let cjk_bytes_global = load_cjk_bytes(cjk_font, kzktdk::config::DEFAULT_CJK_FONT_PATH);
             let session = kzktdk::editor::EditorSession::new(font_bytes_global, cjk_bytes_global)?;
             std::fs::create_dir_all(&output)?;
             let proj_dir = project.parent().unwrap_or(Path::new(".")).to_path_buf();
