@@ -484,26 +484,31 @@ fn translate_format_json_stdout_stays_pure() {
 
 #[test]
 fn stub_ocr_rec_fails_fast_without_model() {
-    // Fase-4: --translate-free-text / --mode ocr with rapid|manga must fail
-    // with "not implemented" BEFORE model load (hermetic: needs no model,
-    // no keys, no network — translate needs no input, detect never opens it).
+    // Fase-4: manga stub must fail; rapid now has rec but cht unsupported
     let cases: &[&[&str]] = &[
-        &["translate", "--mode", "ocr", "--ocr", "rapid"],
         &["translate", "--translate-free-text", "--ocr", "manga"],
         &[
             "detect",
             "/definitely/not/here.png",
             "--translate-free-text",
             "--ocr",
-            "rapid",
+            "manga",
         ],
     ];
     for args in cases {
         let (code, _, stderr) = run(args);
         assert_ne!(code, 0, "stub rec should fail fast: {args:?}");
         assert!(
-            stderr.to_lowercase().contains("not implemented"),
+            stderr.to_lowercase().contains("not implemented") || stderr.contains("cannot read text"),
             "expected rec-unsupported error, got: {stderr}"
         );
     }
+    
+    // rapid no longer stub, but cht unsupported
+    let (code, _, stderr) = run(&["translate", "--mode", "ocr", "--ocr", "rapid", "--ocr-script", "cht"]);
+    assert_ne!(code, 0, "cht should fail");
+    assert!(
+        stderr.contains("not yet supported") || stderr.contains("Traditional"),
+        "expected cht unsupported, got: {stderr}"
+    );
 }

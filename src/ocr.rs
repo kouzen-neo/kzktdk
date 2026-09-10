@@ -817,4 +817,19 @@ mod tests {
         assert_eq!(manga.recognize(&img, [5, 5, 50, 50]), None);
         assert!(manga.recognize_regions(&img, &[]).is_empty());
     }
+
+    #[test]
+    fn rapid_model_urls_cover_supported_scripts() {
+        use crate::config::rapid_model_urls;
+        assert!(rapid_model_urls(OcrScript::Japanese).is_some());
+        assert!(rapid_model_urls(OcrScript::Korean).is_some());
+        assert!(rapid_model_urls(OcrScript::English).is_some());
+        assert!(rapid_model_urls(OcrScript::Chinese).is_some());
+        assert!(rapid_model_urls(OcrScript::ChineseTraditional).is_none());
+        assert!(rapid_model_urls(OcrScript::Auto).is_none());
+        
+        let (rec, dict) = rapid_model_urls(OcrScript::Japanese).unwrap();
+        assert!(rec.contains("japan_rec_crnn.onnx"));
+        assert!(dict.contains("japan_dict.txt"));
+    }
 }
