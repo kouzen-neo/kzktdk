@@ -83,20 +83,14 @@ pub trait OcrEngine: Send + Sync {
 // must fail fast via `ensure_rec_available` instead of translating lies.
 
 /// True when `name` selects a KNOWN engine without real text recognition
-/// (manga stub only now; rapid has rec). Unknown names fall back to noop elsewhere.
+/// (none currently; rapid has rec, tesseract is external, manga removed).
 pub fn engine_rec_stub(name: &str) -> bool {
-    matches!(name.to_lowercase().as_str(), "manga")
+    let _ = name;
+    false
 }
 
 /// Fail fast when rec is explicitly required but the engine is a stub or script unsupported.
 pub fn ensure_rec_available(ocr: &str, script: OcrScript) -> anyhow::Result<()> {
-    if engine_rec_stub(ocr) {
-        anyhow::bail!(
-            "OCR text recognition (rec) is not implemented for engine '{ocr}': \
-             stub engine cannot read text, so the requested operation cannot run. \
-             Use --ocr tesseract or --ocr rapid instead."
-        );
-    }
     if ocr.to_lowercase() == "rapid" && script == OcrScript::ChineseTraditional {
         anyhow::bail!(
             "OCR script 'cht' (Traditional Chinese) is not yet supported: \
@@ -583,23 +577,6 @@ fn trial_decode_language(
     best_script
 }
 
-pub struct MangaOcr {
-    pub model_path: Option<PathBuf>,
-}
-impl OcrEngine for MangaOcr {
-    fn recognize(&self, _image: &RgbImage, _bbox: [u32; 4]) -> Option<String> {
-        warn_rec_stub_once("manga");
-        None
-    }
-    fn recognize_regions(&self, _full: &RgbImage, _exclude: &[[u32; 4]]) -> Vec<TextRegion> {
-        // Stub: no detection implementation — honest empty, never fake boxes.
-        Vec::new()
-    }
-    fn name(&self) -> &'static str {
-        "manga"
-    }
-}
-
 pub struct TesseractOcr {
     pub script: OcrScript,
 }
@@ -868,12 +845,6 @@ fn ensure_model_cached(engine: &str, custom_path: Option<&Path>) -> Option<PathB
                 dir
             );
         }
-        "manga" => {
-            eprintln!(
-                "[OCR] manga model not cached at {:?} — expected onnx-community/manga-ocr-base-ONNX. Run with --ocr-model <path>.",
-                dir
-            );
-        }
         _ => {}
     }
     let _ = std::fs::create_dir_all(&dir);
@@ -908,15 +879,11 @@ pub fn create_ocr_engine(
                 })
             }
         }
-        "manga" => {
-            let p = ensure_model_cached("manga", ocr_model);
-            Box::new(MangaOcr { model_path: p })
-        }
         "tesseract" => Box::new(TesseractOcr { script }),
         // legacy aliases
-        "vision" | "local" => {
+        "vision" | "local" | "manga" => {
             eprintln!(
-                "[OCR] engine '{}' deprecated, use rapid|manga|tesseract, fallback none",
+                "[OCR] engine '{}' deprecated or removed, use rapid|tesseract, fallback none",
                 name
             );
             Box::new(NoopOcr)
@@ -934,17 +901,15 @@ mod tests {
 
     #[test]
     fn stub_engines_report_no_rec() {
-        assert!(engine_rec_stub("manga"));
-        assert!(engine_rec_stub("MANGA"));
         assert!(!engine_rec_stub("rapid"));
         assert!(!engine_rec_stub("tesseract"));
         assert!(!engine_rec_stub("none"));
+        assert!(!engine_rec_stub("manga"));
         assert!(!engine_rec_stub("bogus"));
     }
 
     #[test]
-    fn ensure_rec_available_fails_fast_for_stubs() {
-        assert!(ensure_rec_available("manga", OcrScript::Japanese).is_err());
+    fn ensure_rec_available_fails_fast_for_unsupported() {
         assert!(ensure_rec_available("tesseract", OcrScript::Japanese).is_ok());
         assert!(ensure_rec_available("none", OcrScript::Japanese).is_ok());
         assert!(ensure_rec_available("rapid", OcrScript::Japanese).is_ok());
@@ -954,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn stub_engines_never_guess_text() {
+    fn rapid_without_models_returns_empty() {
         let img = RgbImage::from_pixel(64, 64, image::Rgb([255, 255, 255]));
         let rapid = RapidOcr {
             model_path: None,
@@ -965,9 +930,6 @@ mod tests {
         };
         assert_eq!(rapid.recognize(&img, [5, 5, 50, 50]), None);
         assert!(rapid.recognize_regions(&img, &[]).is_empty());
-        let manga = MangaOcr { model_path: None };
-        assert_eq!(manga.recognize(&img, [5, 5, 50, 50]), None);
-        assert!(manga.recognize_regions(&img, &[]).is_empty());
     }
 
     #[test]
