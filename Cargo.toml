@@ -3,6 +3,12 @@ name = "kzktdk"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Tauri GUI bindings (src/tauri.rs). The GUI project adds `tauri` itself;
+# this feature only gates our command-ready wrappers.
+tauri = []
+
 [dependencies]
 ab_glyph = "0.2.32"
 anyhow = "1.0.104"
@@ -24,3 +30,4 @@ toml = "0.8.20"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["full"] }
 zip = "2"
+pdfium-render = "0.9"

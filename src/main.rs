@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use image::{GenericImageView, Rgb, RgbImage};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -15,8 +16,7 @@ use kzktdk::metadata::{self, PageEditData};
 use kzktdk::model::decrypt::decrypt_model;
 use kzktdk::model::yolo::YoloModel;
 use kzktdk::translation::{
-    CropItem, MosaicBuilder, Provider, ProviderChain, RateLimiter, build_translation_prompt,
-    translate_with_chain,
+    CropItem, MosaicBuilder, Provider, ProviderChain, RateLimiter, translate_with_chain,
 };
 use kzktdk::typesetting::Typesetter;
 
@@ -119,6 +119,12 @@ enum Commands {
         /// Custom OCR model path override
         #[arg(long)]
         ocr_model: Option<PathBuf>,
+        /// Output format: text (previews + logs) or json (detections array to stdout)
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+        format: String,
+        /// Suppress informational logs (data goes to stdout, logs to stderr)
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
     },
 
     /// Inpaint/erase original text inside dialogue bubbles
@@ -144,12 +150,12 @@ Examples:
   kzktdk translate \"chapter_01.cbz\" --provider ollama --openai-base-url \"http://localhost:11434/v1\" --openai-model \"llama3.2-vision\"
   kzktdk translate \"chapter.cbz\" --fallback-provider openai --rate-limit 3 --jobs auto")]
     Translate {
-        /// Input path: image (.jpg/.png/.webp), folder, or comic archive (.cbz/.zip/.epub)
+        /// Input path: image (.jpg/.png/.webp), folder, or comic archive (.cbz/.zip/.epub/.pdf)
         input: Option<PathBuf>,
         /// Output path (image file, folder, or .cbz file)
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Export format: 'folder', 'cbz', or 'auto' (defaults to 'auto')
+        /// Export format: 'folder', 'cbz', 'pdf', or 'auto' (defaults to 'auto')
         #[arg(long, default_value = "auto")]
         export: String,
         /// ONNX model path
@@ -230,6 +236,21 @@ Examples:
         /// Custom OCR model path override (else auto-download ~/.cache/kzktdk/models/<engine>/)
         #[arg(long)]
         ocr_model: Option<PathBuf>,
+        /// Glossary file: JSON object mapping source term -> required translation
+        #[arg(long)]
+        glossary: Option<PathBuf>,
+        /// Progress output: text or jsonl (JSON lines to stderr)
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "jsonl"]))]
+        progress: String,
+        /// Machine-readable final summary format: text or json (JSON to stdout)
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+        format: String,
+        /// Suppress informational logs (data goes to stdout, logs to stderr)
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
+        /// Retry only failed pages from a previous output folder (skip pages with good output)
+        #[arg(long)]
+        retry_failed: Option<PathBuf>,
     },
 
     /// Metadata operations for editor backend
@@ -257,6 +278,9 @@ enum MetadataCmd {
         /// ONNX model path
         #[arg(short, long, default_value = "models/kzkt.onnx")]
         model: PathBuf,
+        /// Initial reading order from bubble geometry: r2l (manga), l2r (western), off
+        #[arg(long, default_value = "r2l", value_parser = clap::builder::PossibleValuesParser::new(["r2l", "l2r", "off"]))]
+        reading_order: String,
     },
     /// Render image from metadata JSON without LLM (single or batch via --project)
     Render {
@@ -440,6 +464,23 @@ enum MetadataCmd {
         /// Output CBZ file
         #[arg(short, long)]
         output: PathBuf,
+        /// Output format: text or json (summary to stdout)
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+        format: String,
+    },
+    /// Set or clear a custom brush mask override for a bubble
+    Mask {
+        /// Metadata JSON file
+        json: PathBuf,
+        /// Bubble ID
+        #[arg(long)]
+        id: String,
+        /// Mask image path (grayscale; white = inpaint). Omit with --clear.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Clear the mask override
+        #[arg(long, default_value_t = false)]
+        clear: bool,
     },
     /// Watch project for changes and incrementally re-render dirty pages
     Watch {
@@ -686,9 +727,40 @@ async fn main() -> Result<()> {
             ocr_script,
             ocr,
             ocr_model,
+            format,
+            quiet,
         } => {
+            let as_json_d = format == "json";
+            macro_rules! dinfo {
+                ($($t:tt)*) => {
+                    if as_json_d || quiet { eprintln!($($t)*) } else { println!($($t)*) }
+                };
+            }
+            // Machine-readable detection record shared by single + batch branches.
+            let det_record = |name: &str,
+                              w: u32,
+                              h: u32,
+                              dets: &[kzktdk::model::yolo::Detection],
+                              ft: &[[u32; 4]]|
+             -> serde_json::Value {
+                serde_json::json!({
+                    "page": name,
+                    "width": w,
+                    "height": h,
+                    "bubbles": dets.iter().enumerate().map(|(i, d)| serde_json::json!({
+                        "id": (i + 1).to_string(),
+                        "bbox": [d.x1, d.y1, d.x2, d.y2],
+                        "conf": d.conf,
+                    })).collect::<Vec<_>>(),
+                    "freetext": ft.iter().enumerate().map(|(i, f)| serde_json::json!({
+                        "id": format!("ft{}", i + 1),
+                        "bbox": f,
+                    })).collect::<Vec<_>>(),
+                })
+            };
+            let mut json_pages: Vec<serde_json::Value> = Vec::new();
             let model_file = ensure_model(&model)?;
-            println!("[1/2] Loading model from {:?}...", model_file);
+            dinfo!("[1/2] Loading model from {:?}...", model_file);
             let mut yolo = YoloModel::new(&model_file)?;
             let jobs_num = parse_jobs(&jobs);
 
@@ -709,12 +781,12 @@ async fn main() -> Result<()> {
                         }
                         out_path
                     };
-                    println!("[2/2] Detecting bubbles on {:?}...", img_path);
+                    dinfo!("[2/2] Detecting bubbles on {:?}...", img_path);
                     let img = image::open(&img_path)
                         .with_context(|| format!("Failed to open {:?}", img_path))?;
                     let (w, h) = (img.width(), img.height());
                     let mut detections = yolo.detect_bubbles(&img)?;
-                    println!("Found {} speech bubbles.", detections.len());
+                    dinfo!("Found {} speech bubbles.", detections.len());
                     // freetext
                     let mut ft_boxes: Vec<[u32; 4]> = Vec::new();
                     if translate_free_text {
@@ -736,13 +808,22 @@ async fn main() -> Result<()> {
                                     &bubble_boxes,
                                     engine.as_ref(),
                                 );
-                                println!("Found {} freetext regions.", ft_boxes.len());
+                                dinfo!("Found {} freetext regions.", ft_boxes.len());
                             }
                         }
                     }
+                    if as_json_d {
+                        json_pages.push(det_record(
+                            &img_path.file_name().unwrap_or_default().to_string_lossy(),
+                            w,
+                            h,
+                            &detections,
+                            &ft_boxes,
+                        ));
+                    }
                     let mut rgb_img = img.to_rgb8();
                     for (idx, det) in detections.iter().enumerate() {
-                        println!(
+                        dinfo!(
                             "  Bubble #{}: [{}, {}, {}, {}] (conf: {:.2})",
                             idx + 1,
                             det.x1,
@@ -762,7 +843,7 @@ async fn main() -> Result<()> {
                         );
                     }
                     for (idx, fb) in ft_boxes.iter().enumerate() {
-                        println!(
+                        dinfo!(
                             "  Freetext #{}: [{},{},{},{}]",
                             idx + 1,
                             fb[0],
@@ -781,7 +862,7 @@ async fn main() -> Result<()> {
                         );
                     }
                     rgb_img.save(&out_path)?;
-                    println!("Saved detection preview to {:?}", out_path);
+                    dinfo!("Saved detection preview to {:?}", out_path);
                     if let Some(json_path) = json {
                         let mut bubbles: Vec<metadata::Bubble> = detections
                             .iter()
@@ -823,18 +904,22 @@ async fn main() -> Result<()> {
                             data.ocr_engine = Some(ocr.clone());
                         }
                         metadata::save_page_metadata(&json_path, &data)?;
-                        println!("Saved JSON to {:?}", json_path);
+                        dinfo!("Saved JSON to {:?}", json_path);
+                    }
+                    if as_json_d {
+                        println!("{}", serde_json::to_string_pretty(&json_pages).unwrap());
                     }
                 }
                 PreparedInput::Batch {
                     images,
                     _temp_guard: _,
                     is_archive: _,
+                    is_pdf: _,
                     original_name,
                 } => {
                     let out_dir = output.unwrap_or_else(|| PathBuf::from("detected"));
                     std::fs::create_dir_all(&out_dir)?;
-                    println!(
+                    dinfo!(
                         "[2/2] Detecting bubbles on {} pages (jobs={})...",
                         images.len(),
                         jobs_num
@@ -908,7 +993,7 @@ async fn main() -> Result<()> {
                                 .with_context(|| format!("Failed to open {:?}", p))?;
                             let (w, h) = (img.width(), img.height());
                             let dets = yolo.detect_bubbles(&img)?;
-                            println!(
+                            dinfo!(
                                 "[Page {}/{}] {:?}: {} bubbles",
                                 idx + 1,
                                 images.len(),
@@ -929,6 +1014,7 @@ async fn main() -> Result<()> {
                                 );
                             }
                             // also draw ft
+                            let mut fts_page: Vec<[u32; 4]> = Vec::new();
                             if translate_free_text && ocr != "none" {
                                 let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
                                 let engine = kzktdk::ocr::create_ocr_engine(
@@ -939,12 +1025,12 @@ async fn main() -> Result<()> {
                                 if engine.name() != "none" {
                                     let bboxes: Vec<[u32; 4]> =
                                         dets.iter().map(|d| [d.x1, d.y1, d.x2, d.y2]).collect();
-                                    let fts = kzktdk::preparer::detect_free_text(
+                                    fts_page = kzktdk::preparer::detect_free_text(
                                         &rgb,
                                         &bboxes,
                                         engine.as_ref(),
                                     );
-                                    for fb in &fts {
+                                    for fb in &fts_page {
                                         draw_rect(
                                             &mut rgb_out,
                                             fb[0],
@@ -959,6 +1045,15 @@ async fn main() -> Result<()> {
                             }
                             let out = out_dir.join(p.file_name().unwrap());
                             rgb_out.save(&out)?;
+                            if as_json_d {
+                                json_pages.push(det_record(
+                                    &p.file_name().unwrap_or_default().to_string_lossy(),
+                                    w,
+                                    h,
+                                    &dets,
+                                    &fts_page,
+                                ));
+                            }
                             if json.is_some() {
                                 all_pages.push(make_page_with_ft(p, dets, w, h, &rgb));
                             }
@@ -970,7 +1065,7 @@ async fn main() -> Result<()> {
                                 .with_context(|| format!("Failed to open {:?}", p))?;
                             let (w, h) = (img.width(), img.height());
                             let dets = yolo.detect_bubbles(&img)?;
-                            println!(
+                            dinfo!(
                                 "[Page {}/{}] {:?}: {} bubbles",
                                 idx + 1,
                                 images.len(),
@@ -990,6 +1085,7 @@ async fn main() -> Result<()> {
                                     2,
                                 );
                             }
+                            let mut fts_page: Vec<[u32; 4]> = Vec::new();
                             if translate_free_text && ocr != "none" {
                                 let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
                                 let engine = kzktdk::ocr::create_ocr_engine(
@@ -1000,12 +1096,12 @@ async fn main() -> Result<()> {
                                 if engine.name() != "none" {
                                     let bboxes: Vec<[u32; 4]> =
                                         dets.iter().map(|d| [d.x1, d.y1, d.x2, d.y2]).collect();
-                                    let fts = kzktdk::preparer::detect_free_text(
+                                    fts_page = kzktdk::preparer::detect_free_text(
                                         &rgb,
                                         &bboxes,
                                         engine.as_ref(),
                                     );
-                                    for fb in &fts {
+                                    for fb in &fts_page {
                                         draw_rect(
                                             &mut rgb_out,
                                             fb[0],
@@ -1020,17 +1116,29 @@ async fn main() -> Result<()> {
                             }
                             let out = out_dir.join(p.file_name().unwrap());
                             rgb_out.save(&out)?;
+                            if as_json_d {
+                                json_pages.push(det_record(
+                                    &p.file_name().unwrap_or_default().to_string_lossy(),
+                                    w,
+                                    h,
+                                    &dets,
+                                    &fts_page,
+                                ));
+                            }
                             if json.is_some() {
                                 all_pages.push(make_page_with_ft(p, dets, w, h, &rgb));
                             }
                         }
                     }
-                    println!("Saved {} previews to {:?}", images.len(), out_dir);
+                    dinfo!("Saved {} previews to {:?}", images.len(), out_dir);
                     if let Some(json_path) = json {
                         let v = serde_json::to_value(&all_pages).unwrap();
                         std::fs::create_dir_all(json_path.parent().unwrap_or(Path::new(".")))?;
                         std::fs::write(&json_path, serde_json::to_string_pretty(&v).unwrap())?;
-                        println!("Saved batch JSON to {:?}", json_path);
+                        dinfo!("Saved batch JSON to {:?}", json_path);
+                    }
+                    if as_json_d {
+                        println!("{}", serde_json::to_string_pretty(&json_pages).unwrap());
                     }
                 }
             }
@@ -1088,7 +1196,20 @@ async fn main() -> Result<()> {
             ocr_script,
             mode,
             ocr_model,
+            glossary,
+            progress,
+            format,
+            quiet,
+            retry_failed,
         } => {
+            let jsonl = progress == "jsonl";
+            let as_json = format == "json";
+            let verbose = !(jsonl || quiet);
+            macro_rules! tinfo {
+                ($($t:tt)*) => {
+                    if verbose { println!($($t)*) } else { eprintln!($($t)*) }
+                };
+            }
             if clear_cache {
                 let cache = TranslationCache::open()?;
                 cache.clear()?;
@@ -1111,7 +1232,7 @@ async fn main() -> Result<()> {
 
             let model_file = ensure_model(&model)?;
 
-            println!("==> Step 1: Initializing Pipeline & Model");
+            tinfo!("==> Step 1: Initializing Pipeline & Model");
             // Resolve font via registry/config (global + per-bubble support)
             let font_bytes = {
                 let font_str = font.to_string_lossy().to_string();
@@ -1228,21 +1349,47 @@ async fn main() -> Result<()> {
             let provider_chain = ProviderChain { primary, fallbacks };
             let rate_limiter = RateLimiter::new(rate_limit);
             let jobs_num = parse_jobs(&jobs);
-            println!(
+            tinfo!(
                 "  Jobs: {} (batch parallel), RateLimit: {} RPS",
-                jobs_num, rate_limit
+                jobs_num,
+                rate_limit
             );
             if !provider_chain.fallbacks.is_empty() {
                 let fb_names: Vec<_> = provider_chain.fallbacks.iter().map(|p| p.name()).collect();
-                println!("  Fallbacks: {}", fb_names.join(", "));
+                tinfo!("  Fallbacks: {}", fb_names.join(", "));
             }
+
+            // Glossary (exit 2 on invalid data).
+            let glossary_map: Option<BTreeMap<String, String>> = if let Some(ref gpath) = glossary {
+                match kzktdk::translation::load_glossary(gpath) {
+                    Ok(g) => {
+                        tinfo!("  Glossary: {} terms from {:?}", g.len(), gpath);
+                        Some(g)
+                    }
+                    Err(e) => {
+                        eprintln!("Invalid glossary: {:#}", e);
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                None
+            };
+            let gloss_hits = Arc::new(AtomicUsize::new(0));
+            let gloss_misses = Arc::new(AtomicUsize::new(0));
+
+            // Ctrl-C: finish in-flight pages, skip the rest, exit 130.
+            tokio::spawn(async {
+                let _ = tokio::signal::ctrl_c().await;
+                CANCELLED.store(true, Ordering::SeqCst);
+                eprintln!("[cancel] Ctrl-C received, finishing in-flight pages...");
+            });
 
             let use_cache = !no_cache;
             let prompt_sig = prompt_signature(prompt.as_deref());
             let cache_opt = if use_cache {
                 match TranslationCache::open() {
                     Ok(c) => {
-                        println!("  Cache: enabled (prompt_sig={})", prompt_sig);
+                        tinfo!("  Cache: enabled (prompt_sig={})", prompt_sig);
                         Some(Arc::new(c))
                     }
                     Err(e) => {
@@ -1251,11 +1398,14 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                println!("  Cache: disabled");
+                tinfo!("  Cache: disabled");
                 None
             };
 
-            let mut final_prompt = build_translation_prompt(&target_lang);
+            let mut final_prompt = kzktdk::translation::build_translation_prompt_with_glossary(
+                &target_lang,
+                glossary_map.as_ref(),
+            );
             if let Some(ref custom) = prompt {
                 final_prompt.push_str("\n\nADDITIONAL TRANSLATION RULES:\n");
                 final_prompt.push_str(custom);
@@ -1263,13 +1413,13 @@ async fn main() -> Result<()> {
 
             // We need to defer Yolo creation for parallel batch: use Arc<Mutex> or per-task.
             // For simplicity, create one for single image path, and for batch we create per task via model_file clone.
-            println!("==> Step 2: Preparing Input ({:?})", input);
+            tinfo!("==> Step 2: Preparing Input ({:?})", input);
             let prepared = archive::prepare_input(&input)?;
 
             match prepared {
                 PreparedInput::SingleImage(img_path) => {
                     let mut yolo = YoloModel::new(&model_file)?;
-                    let out_path = output.unwrap_or_else(|| {
+                    let out_path = output.clone().unwrap_or_else(|| {
                         let stem = img_path.file_stem().unwrap_or_default().to_string_lossy();
                         let ext = img_path.extension().unwrap_or_default().to_string_lossy();
                         img_path
@@ -1295,8 +1445,47 @@ async fn main() -> Result<()> {
                         ocr_script: ocr_script.clone(),
                         mode: mode.clone(),
                         ocr_model: ocr_model.clone(),
+                        glossary: glossary_map.clone(),
+                        gloss_hits: gloss_hits.clone(),
+                        gloss_misses: gloss_misses.clone(),
+                        progress: progress.clone(),
+                        quiet,
+                        page_idx: 1,
+                        page_total: 1,
                     };
-                    translate_page(&img_path, &out_path, &mut yolo, &ctx).await?;
+                    let fname = img_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    // --retry-failed: reuse previous good output when available.
+                    let mut rec = PageRecord {
+                        idx: 0,
+                        file: fname,
+                        out: out_path.to_string_lossy().to_string(),
+                        ok: true,
+                        skipped: false,
+                        err: None,
+                    };
+                    if let Some(ref rdir) = retry_failed {
+                        if let Some(prev) =
+                            retry_hit(rdir, img_path.file_name().unwrap_or_default())
+                        {
+                            if let Some(parent) = out_path.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::copy(&prev, &out_path)?;
+                            rec.skipped = true;
+                            tinfo!("    [Retry] Reusing previous output {:?}", prev);
+                        }
+                    }
+                    if !rec.skipped {
+                        if let Err(e) = translate_page(&img_path, &out_path, &mut yolo, &ctx).await
+                        {
+                            rec.ok = false;
+                            rec.err = Some(e.to_string());
+                        }
+                    }
 
                     // Save project.kedit.json for single image if requested
                     if save_metadata {
@@ -1309,23 +1498,47 @@ async fn main() -> Result<()> {
                             out_path.file_stem().unwrap_or_default().to_string_lossy()
                         ));
                         metadata::save_project(&proj, &[sidecar], Some(target_lang.clone()))?;
-                        println!("[Metadata] Project saved to {:?}", proj);
+                        tinfo!("[Metadata] Project saved to {:?}", proj);
                     }
 
-                    println!("\n==> Success! Translated manga saved to {:?}", out_path);
+                    tinfo!("\n==> Success! Translated manga saved to {:?}", out_path);
+                    finish_translate(
+                        &[rec],
+                        gloss_hits.load(Ordering::SeqCst),
+                        gloss_misses.load(Ordering::SeqCst),
+                        out_path.to_string_lossy().to_string(),
+                        jsonl,
+                        as_json,
+                        verbose,
+                    );
                 }
 
                 PreparedInput::Batch {
                     images,
                     _temp_guard,
                     is_archive,
+                    is_pdf,
                     original_name,
                 } => {
-                    println!(
+                    tinfo!(
                         "==> Found {} pages (natural order) to translate.",
                         images.len()
                     );
 
+                    let export_as_pdf = match export.to_lowercase().as_str() {
+                        "pdf" => true,
+                        "cbz" | "folder" => false,
+                        _ => {
+                            if let Some(ref out) = output {
+                                out.extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|e| e.eq_ignore_ascii_case("pdf"))
+                                    .unwrap_or(false)
+                            } else {
+                                is_pdf
+                            }
+                        }
+                    };
                     let export_as_cbz = match export.to_lowercase().as_str() {
                         "cbz" => true,
                         "folder" => false,
@@ -1356,8 +1569,10 @@ async fn main() -> Result<()> {
                     if jobs_num <= 1 || images.len() <= 1 {
                         // Sequential fallback
                         let mut translated_files = Vec::new();
+                        let mut records: Vec<PageRecord> = Vec::new();
                         let mut yolo = YoloModel::new(&model_file)?;
-                        let ctx = TranslationContext {
+                        let total_pages = images.len();
+                        let mut ctx = TranslationContext {
                             chain: &provider_chain,
                             rate_limiter: &rate_limiter,
                             prompt: &final_prompt,
@@ -1374,16 +1589,59 @@ async fn main() -> Result<()> {
                             ocr_script: ocr_script.clone(),
                             mode: mode.clone(),
                             ocr_model: ocr_model.clone(),
+                            glossary: glossary_map.clone(),
+                            gloss_hits: gloss_hits.clone(),
+                            gloss_misses: gloss_misses.clone(),
+                            progress: progress.clone(),
+                            quiet,
+                            page_idx: 1,
+                            page_total: total_pages,
                         };
                         for (idx, file_path) in images.iter().enumerate() {
+                            if CANCELLED.load(Ordering::SeqCst) {
+                                for (rest_idx, rest) in images.iter().enumerate().skip(idx) {
+                                    records.push(PageRecord {
+                                        idx: rest_idx,
+                                        file: rest
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string(),
+                                        out: String::new(),
+                                        ok: false,
+                                        skipped: false,
+                                        err: Some("cancelled".to_string()),
+                                    });
+                                }
+                                break;
+                            }
+                            ctx.page_idx = idx + 1;
                             let file_name = file_path.file_name().unwrap();
                             let target_path = temp_output_dir.join(file_name);
-                            println!(
+                            tinfo!(
                                 "\n[Page {}/{}] Translating: {:?}",
                                 idx + 1,
                                 images.len(),
                                 file_name
                             );
+                            let mut rec = PageRecord {
+                                idx,
+                                file: file_name.to_string_lossy().to_string(),
+                                out: target_path.to_string_lossy().to_string(),
+                                ok: true,
+                                skipped: false,
+                                err: None,
+                            };
+                            if let Some(ref rdir) = retry_failed {
+                                if let Some(prev) = retry_hit(rdir, file_name) {
+                                    let _ = std::fs::copy(&prev, &target_path);
+                                    rec.skipped = true;
+                                    tinfo!("    [Retry] Reusing previous output {:?}", prev);
+                                    translated_files.push(target_path);
+                                    records.push(rec);
+                                    continue;
+                                }
+                            }
                             if let Err(e) =
                                 translate_page(file_path, &target_path, &mut yolo, &ctx).await
                             {
@@ -1392,10 +1650,13 @@ async fn main() -> Result<()> {
                                     file_name, e
                                 );
                                 let _ = std::fs::copy(file_path, &target_path);
+                                rec.ok = false;
+                                rec.err = Some(e.to_string());
                             } else {
-                                println!("    Saved -> {:?}", target_path);
+                                tinfo!("    Saved -> {:?}", target_path);
                             }
                             translated_files.push(target_path);
+                            records.push(rec);
                         }
                         if save_metadata {
                             let meta_dir = metadata_dir
@@ -1414,29 +1675,55 @@ async fn main() -> Result<()> {
                             let proj = meta_dir.join("project.kedit.json");
                             let _ =
                                 metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
-                            println!("[Metadata] Project saved to {:?}", proj);
+                            tinfo!("[Metadata] Project saved to {:?}", proj);
                         }
-                        if export_as_cbz {
+                        let output_desc = if export_as_pdf {
+                            let pdf_out = if let Some(ref out) = output {
+                                out.clone()
+                            } else {
+                                let parent = input.parent().unwrap_or(Path::new("."));
+                                parent.join(format!("{}_translated.pdf", original_name))
+                            };
+                            tinfo!(
+                                "\n==> Packing {} pages into PDF: {:?}",
+                                translated_files.len(),
+                                pdf_out
+                            );
+                            archive::create_pdf(&translated_files, &pdf_out)?;
+                            tinfo!("==> PDF Export Complete: {:?}", pdf_out);
+                            pdf_out.to_string_lossy().to_string()
+                        } else if export_as_cbz {
                             let cbz_out = if let Some(ref out) = output {
                                 out.clone()
                             } else {
                                 let parent = input.parent().unwrap_or(Path::new("."));
                                 parent.join(format!("{}_translated.cbz", original_name))
                             };
-                            println!(
+                            tinfo!(
                                 "\n==> Packing {} pages into CBZ: {:?}",
                                 translated_files.len(),
                                 cbz_out
                             );
                             archive::create_cbz(&translated_files, &cbz_out)?;
-                            println!("==> CBZ Export Complete: {:?}", cbz_out);
+                            tinfo!("==> CBZ Export Complete: {:?}", cbz_out);
+                            cbz_out.to_string_lossy().to_string()
                         } else {
-                            println!(
+                            tinfo!(
                                 "\n==> All {} pages successfully saved to {:?}",
                                 translated_files.len(),
                                 temp_output_dir
                             );
-                        }
+                            temp_output_dir.to_string_lossy().to_string()
+                        };
+                        finish_translate(
+                            &records,
+                            gloss_hits.load(Ordering::SeqCst),
+                            gloss_misses.load(Ordering::SeqCst),
+                            output_desc,
+                            jsonl,
+                            as_json,
+                            verbose,
+                        );
                     } else {
                         // Parallel with JoinSet + Semaphore
                         use tokio::sync::Semaphore;
@@ -1469,10 +1756,14 @@ async fn main() -> Result<()> {
                         let ocr_script_c = ocr_script.clone();
                         let mode_c = mode.clone();
                         let ocr_model_c = ocr_model.clone();
+                        let glossary_c = glossary_map.clone();
+                        let progress_c = progress.clone();
+                        let gloss_hits_c = gloss_hits.clone();
+                        let gloss_misses_c = gloss_misses.clone();
+                        let retry_c = retry_failed.clone();
 
                         for (idx, file_path) in images.iter().enumerate() {
                             let sem = semaphore.clone();
-                            let completed = completed.clone();
                             let out_dir = temp_output_dir.clone();
                             let file_path = file_path.clone();
                             let model_file = model_file_arc.clone();
@@ -1497,8 +1788,23 @@ async fn main() -> Result<()> {
                             let ocr_script_c2 = ocr_script_c.clone();
                             let mode_c2 = mode_c.clone();
                             let ocr_model_c2 = ocr_model_c.clone();
+                            let glossary_c2 = glossary_c.clone();
+                            let progress_c2 = progress_c.clone();
+                            let gloss_hits_c2 = gloss_hits_c.clone();
+                            let gloss_misses_c2 = gloss_misses_c.clone();
+                            let retry_c2 = retry_c.clone();
+                            let total_c = total;
                             join_set.spawn(async move {
                                 let _permit = sem.acquire_owned().await.unwrap();
+                                let file_name = file_path.file_name().unwrap().to_owned();
+                                let target_path = out_dir.join(&file_name);
+                                // --retry-failed: reuse previous good output without loading models.
+                                if let Some(ref rdir) = retry_c2 {
+                                    if let Some(prev) = retry_hit(rdir, file_name.as_os_str()) {
+                                        let _ = std::fs::copy(&prev, &target_path);
+                                        return (target_path, idx, true, None, true);
+                                    }
+                                }
                                 // Rebuild chain per task (cheap)
                                 let primary = build_provider(
                                     &provider_name,
@@ -1537,8 +1843,6 @@ async fn main() -> Result<()> {
                                 let limiter = RateLimiter::new(rate_limit_c);
                                 let mut yolo =
                                     YoloModel::new(model_file.as_path()).expect("yolo load failed");
-                                let file_name = file_path.file_name().unwrap().to_owned();
-                                let target_path = out_dir.join(&file_name);
                                 // per-task cache (open fresh connection to avoid !Send)
                                 let cache_local: Option<TranslationCache> = if use_cache_flag {
                                     TranslationCache::open().ok()
@@ -1565,36 +1869,118 @@ async fn main() -> Result<()> {
                                     ocr_script: ocr_script_c2,
                                     mode: mode_c2,
                                     ocr_model: ocr_model_c2,
+                                    glossary: glossary_c2,
+                                    gloss_hits: gloss_hits_c2,
+                                    gloss_misses: gloss_misses_c2,
+                                    progress: progress_c2,
+                                    quiet,
+                                    page_idx: idx + 1,
+                                    page_total: total_c,
                                 };
-                                let res =
-                                    translate_page(&file_path, &target_path, &mut yolo, &ctx).await;
-                                let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                                match res {
-                                    Ok(_) => println!(
-                                        "[Page {}/{}] Done {:?} -> {:?}",
-                                        done, total, file_name, target_path
-                                    ),
+                                match translate_page(&file_path, &target_path, &mut yolo, &ctx)
+                                    .await
+                                {
+                                    Ok(()) => (target_path, idx, true, None, false),
                                     Err(e) => {
-                                        eprintln!(
-                                            "[Page {}/{}] [!] Error {:?}: {}. Copying original.",
-                                            done, total, file_name, e
-                                        );
+                                        let msg = e.to_string();
                                         let _ = std::fs::copy(&file_path, &target_path);
+                                        (target_path, idx, false, Some(msg), false)
                                     }
                                 }
-                                (target_path, idx)
                             });
                         }
 
-                        let mut results: Vec<(PathBuf, usize)> = Vec::new();
-                        while let Some(r) = join_set.join_next().await {
-                            if let Ok(v) = r {
-                                results.push(v);
+                        let mut results: Vec<(PathBuf, usize, bool, Option<String>, bool)> =
+                            Vec::new();
+                        let mut pending: std::collections::HashSet<usize> =
+                            (0..images.len()).collect();
+                        let mut cancel_logged = false;
+                        loop {
+                            if CANCELLED.load(Ordering::SeqCst) && !cancel_logged {
+                                cancel_logged = true;
+                                eprintln!(
+                                    "[cancel] Ctrl-C: aborting queued pages, finishing in-flight..."
+                                );
+                                join_set.abort_all();
+                            }
+                            match join_set.join_next().await {
+                                Some(Ok((p, idx, ok, err, skipped))) => {
+                                    pending.remove(&idx);
+                                    let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                                    if verbose {
+                                        if ok {
+                                            println!(
+                                                "[Page {}/{}] Done {:?} -> {:?}{}",
+                                                done,
+                                                total,
+                                                images[idx].file_name().unwrap_or_default(),
+                                                p,
+                                                if skipped { " (reused)" } else { "" }
+                                            );
+                                        } else {
+                                            println!(
+                                                "[Page {}/{}] [!] Failed {:?}: {}",
+                                                done,
+                                                total,
+                                                images[idx].file_name().unwrap_or_default(),
+                                                err.as_deref().unwrap_or("unknown")
+                                            );
+                                        }
+                                    } else if !ok {
+                                        eprintln!(
+                                            "[Page {}/{}] [!] Failed {:?}: {}",
+                                            done,
+                                            total,
+                                            images[idx].file_name().unwrap_or_default(),
+                                            err.as_deref().unwrap_or("unknown")
+                                        );
+                                    }
+                                    results.push((p, idx, ok, err, skipped));
+                                }
+                                Some(Err(_)) => {
+                                    // Aborted task; resolved via pending set below.
+                                }
+                                None => break,
                             }
                         }
-                        results.sort_by_key(|(_, idx)| *idx);
-                        let translated_files: Vec<PathBuf> =
-                            results.into_iter().map(|(p, _)| p).collect();
+                        results.sort_by_key(|(_, idx, _, _, _)| *idx);
+                        let mut records: Vec<PageRecord> = results
+                            .into_iter()
+                            .map(|(p, idx, ok, err, skipped)| PageRecord {
+                                idx,
+                                file: images[idx]
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string(),
+                                out: p.to_string_lossy().to_string(),
+                                ok,
+                                skipped,
+                                err,
+                            })
+                            .collect();
+                        for idx in pending {
+                            if !records.iter().any(|r| r.idx == idx) {
+                                records.push(PageRecord {
+                                    idx,
+                                    file: images[idx]
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string(),
+                                    out: String::new(),
+                                    ok: false,
+                                    skipped: false,
+                                    err: Some("cancelled".to_string()),
+                                });
+                            }
+                        }
+                        records.sort_by_key(|r| r.idx);
+                        let translated_files: Vec<PathBuf> = records
+                            .iter()
+                            .filter(|r| !r.out.is_empty())
+                            .map(|r| PathBuf::from(&r.out))
+                            .collect();
 
                         if save_meta_flag {
                             let meta_dir = meta_dir_opt
@@ -1613,37 +1999,68 @@ async fn main() -> Result<()> {
                             let proj = meta_dir.join("project.kedit.json");
                             let _ =
                                 metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
-                            println!("[Metadata] Project saved to {:?}", proj);
+                            tinfo!("[Metadata] Project saved to {:?}", proj);
                         }
 
-                        if export_as_cbz {
+                        let output_desc = if export_as_pdf {
+                            let pdf_out = if let Some(ref out) = output {
+                                out.clone()
+                            } else {
+                                let parent = input.parent().unwrap_or(Path::new("."));
+                                parent.join(format!("{}_translated.pdf", original_name))
+                            };
+                            tinfo!(
+                                "\n==> Packing {} pages into PDF: {:?}",
+                                translated_files.len(),
+                                pdf_out
+                            );
+                            archive::create_pdf(&translated_files, &pdf_out)?;
+                            tinfo!("==> PDF Export Complete: {:?}", pdf_out);
+                            pdf_out.to_string_lossy().to_string()
+                        } else if export_as_cbz {
                             let cbz_out = if let Some(ref out) = output {
                                 out.clone()
                             } else {
                                 let parent = input.parent().unwrap_or(Path::new("."));
                                 parent.join(format!("{}_translated.cbz", original_name))
                             };
-                            println!(
+                            tinfo!(
                                 "\n==> Packing {} pages into CBZ: {:?}",
                                 translated_files.len(),
                                 cbz_out
                             );
                             archive::create_cbz(&translated_files, &cbz_out)?;
-                            println!("==> CBZ Export Complete: {:?}", cbz_out);
+                            tinfo!("==> CBZ Export Complete: {:?}", cbz_out);
+                            cbz_out.to_string_lossy().to_string()
                         } else {
-                            println!(
+                            tinfo!(
                                 "\n==> All {} pages successfully saved to {:?}",
                                 translated_files.len(),
                                 temp_output_dir
                             );
-                        }
+                            temp_output_dir.to_string_lossy().to_string()
+                        };
+                        finish_translate(
+                            &records,
+                            gloss_hits.load(Ordering::SeqCst),
+                            gloss_misses.load(Ordering::SeqCst),
+                            output_desc,
+                            jsonl,
+                            as_json,
+                            verbose,
+                        );
                     }
                 }
             }
         }
 
         Commands::Metadata { cmd } => match cmd {
-            MetadataCmd::Export { input, json, model } => {
+            MetadataCmd::Export {
+                input,
+                json,
+                model,
+                reading_order,
+            } => {
                 let model_file = ensure_model(&model)?;
                 let mut yolo = YoloModel::new(&model_file)?;
                 let prepared = archive::prepare_input(&input)?;
@@ -1651,6 +2068,11 @@ async fn main() -> Result<()> {
                 let images = match prepared {
                     PreparedInput::SingleImage(p) => vec![p],
                     PreparedInput::Batch { images, .. } => images,
+                };
+                let ro_mode = if reading_order == "off" {
+                    None
+                } else {
+                    kzktdk::preparer::ReadingMode::from_key(&reading_order)
                 };
                 for p in &images {
                     let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
@@ -1678,6 +2100,18 @@ async fn main() -> Result<()> {
                             })
                             .collect(),
                     ));
+                    // Initial reading order from geometry (unless off).
+                    if let Some(mode) = ro_mode {
+                        if let Some(last) = pages.last_mut() {
+                            let boxes: Vec<[u32; 4]> =
+                                last.bubbles.iter().map(|b| b.bbox).collect();
+                            let ord = kzktdk::preparer::detect_reading_order(&boxes, mode);
+                            if ord.len() == last.bubbles.len() {
+                                last.order =
+                                    Some(ord.iter().map(|&i| last.bubbles[i].id.clone()).collect());
+                            }
+                        }
+                    }
                 }
                 // Single page -> object, multi -> array for backwards compat
                 let v = if pages.len() == 1 {
@@ -2828,7 +3262,14 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            MetadataCmd::Pack { input, output } => {
+            MetadataCmd::Pack {
+                input,
+                output,
+                format,
+            } => {
+                if !input.is_dir() {
+                    bail!("Pack input must be a folder: {:?}", input);
+                }
                 if !input.is_dir() {
                     bail!("Pack input must be a folder: {:?}", input);
                 }
@@ -2861,6 +3302,19 @@ async fn main() -> Result<()> {
                     std::fs::create_dir_all(parent)?;
                 }
                 archive::create_cbz(&files, &output)?;
+                if format == "json" {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "output": output.to_string_lossy(),
+                            "count": files.len(),
+                            "files": files.iter().map(|f| f.file_name().unwrap_or_default().to_string_lossy()).collect::<Vec<_>>(),
+                        }))
+                        .unwrap()
+                    );
+                    return Ok(());
+                }
                 println!("Packed {} images -> {:?}", files.len(), output);
                 for (i, f) in files.iter().enumerate() {
                     println!(
@@ -2869,6 +3323,40 @@ async fn main() -> Result<()> {
                         f.file_name().unwrap().to_string_lossy()
                     );
                 }
+            }
+            MetadataCmd::Mask {
+                json,
+                id,
+                from,
+                clear,
+            } => {
+                let mut data = metadata::load_page_metadata(&json)?;
+                let bubble = data
+                    .bubbles
+                    .iter_mut()
+                    .find(|b| b.id == id)
+                    .with_context(|| format!("Bubble {} not found", id))?;
+                if clear || from.is_none() {
+                    bubble.mask_path = None;
+                    println!("Cleared mask for {}", id);
+                } else {
+                    let mask_path = from.clone().unwrap();
+                    if !mask_path.is_file() {
+                        eprintln!("Mask file not found: {:?}", mask_path);
+                        std::process::exit(2);
+                    }
+                    // Validate dimensions against the bubble crop now (fail fast).
+                    let w = (bubble.bbox[2].saturating_sub(bubble.bbox[0])).max(1);
+                    let h = (bubble.bbox[3].saturating_sub(bubble.bbox[1])).max(1);
+                    if let Err(e) = kzktdk::inpaint::load_mask_for(&mask_path, w, h) {
+                        eprintln!("Invalid mask: {:#}", e);
+                        std::process::exit(2);
+                    }
+                    bubble.mask_path = Some(mask_path.to_string_lossy().to_string());
+                    println!("Set mask {} = {:?}", id, mask_path);
+                }
+                metadata::save_page_metadata(&json, &data)?;
+                println!("Saved edited metadata to {:?}", json);
             }
             MetadataCmd::Watch {
                 project,
@@ -3103,6 +3591,124 @@ struct TranslationContext<'a> {
     ocr_script: String,
     mode: String,
     ocr_model: Option<PathBuf>,
+    glossary: Option<BTreeMap<String, String>>,
+    gloss_hits: Arc<AtomicUsize>,
+    gloss_misses: Arc<AtomicUsize>,
+    progress: String,
+    quiet: bool,
+    page_idx: usize,
+    page_total: usize,
+}
+
+/// Global cancellation flag set by the Ctrl-C handler during batch translate.
+static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One page result for the machine-readable translate summary.
+#[derive(Debug, Clone)]
+struct PageRecord {
+    idx: usize,
+    file: String,
+    out: String,
+    ok: bool,
+    skipped: bool,
+    err: Option<String>,
+}
+
+/// Checks a previous-run folder for a reusable output (`--retry-failed`).
+/// A page counts as already-good when its output file exists AND (no sidecar
+/// exists OR the sidecar has at least one real translation).
+fn retry_hit(retry_dir: &Path, file_name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let prev = retry_dir.join(file_name);
+    if !prev.is_file() {
+        return None;
+    }
+    let stem = Path::new(file_name)
+        .file_stem()?
+        .to_string_lossy()
+        .to_string();
+    let sidecar = retry_dir.join(format!("{}.kedit.json", stem));
+    if sidecar.is_file() {
+        match metadata::load_page_metadata(&sidecar) {
+            Ok(data) => {
+                let any_text = data.bubbles.iter().any(|b| {
+                    let t = b.translated.trim();
+                    !t.is_empty() && t.to_uppercase() != "SKIP"
+                });
+                if !any_text {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(prev)
+}
+
+fn translate_summary(
+    records: &[PageRecord],
+    gloss_hits: usize,
+    gloss_misses: usize,
+    output: &str,
+) -> serde_json::Value {
+    let ok_count = records.iter().filter(|r| r.ok).count();
+    serde_json::json!({
+        "ok": records.iter().all(|r| r.ok),
+        "files": records.iter().map(|r| serde_json::json!({
+            "idx": r.idx, "file": r.file, "out": r.out,
+            "ok": r.ok, "skipped": r.skipped, "error": r.err,
+        })).collect::<Vec<_>>(),
+        "ok_count": ok_count,
+        "fail_count": records.len().saturating_sub(ok_count),
+        "skipped_count": records.iter().filter(|r| r.skipped).count(),
+        "glossary_hits": gloss_hits,
+        "glossary_misses": gloss_misses,
+        "output": output,
+    })
+}
+
+/// Emits the final translate summary (text/jsonl/json) and exits 1 on failures.
+fn finish_translate(
+    records: &[PageRecord],
+    gloss_hits: usize,
+    gloss_misses: usize,
+    output_desc: String,
+    jsonl: bool,
+    as_json: bool,
+    verbose: bool,
+) {
+    let summary = translate_summary(records, gloss_hits, gloss_misses, &output_desc);
+    let fails = records.iter().filter(|r| !r.ok).count();
+    if jsonl {
+        let mut m = summary.as_object().cloned().unwrap_or_default();
+        m.insert("done".into(), serde_json::Value::Bool(true));
+        eprintln!("{}", serde_json::Value::Object(m));
+    } else if verbose {
+        println!(
+            "\n==> Translated {}/{} pages -> {}",
+            records.len().saturating_sub(fails),
+            records.len(),
+            output_desc
+        );
+        if fails > 0 {
+            println!("    [!] {} page(s) failed (original copied)", fails);
+        }
+    } else {
+        eprintln!(
+            "Translated {}/{} pages -> {}",
+            records.len().saturating_sub(fails),
+            records.len(),
+            output_desc
+        );
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+    }
+    if CANCELLED.load(Ordering::SeqCst) {
+        std::process::exit(130);
+    }
+    if fails > 0 {
+        std::process::exit(1);
+    }
 }
 
 async fn translate_page(
@@ -3111,16 +3717,36 @@ async fn translate_page(
     yolo: &mut YoloModel,
     ctx: &TranslationContext<'_>,
 ) -> Result<()> {
+    let jsonl = ctx.progress == "jsonl";
+    let verbose = !(jsonl || ctx.quiet);
+    macro_rules! tinfo {
+        ($($t:tt)*) => {
+            if verbose { println!($($t)*) } else { eprintln!($($t)*) }
+        };
+    }
+    let emit = |phase: &str| {
+        if jsonl {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "idx": ctx.page_idx,
+                    "total": ctx.page_total,
+                    "page": input_path.file_name().unwrap_or_default().to_string_lossy(),
+                    "phase": phase,
+                })
+            );
+        }
+    };
     let img =
         image::open(input_path).with_context(|| format!("Failed to open {:?}", input_path))?;
     let mut detections = yolo.detect_bubbles(&img)?;
 
     if detections.is_empty() && !ctx.translate_free_text {
-        println!("    [Page] No dialogue bubbles detected. Copying original.");
+        tinfo!("    [Page] No dialogue bubbles detected. Copying original.");
         img.save(output_path)?;
         return Ok(());
     }
-    println!("    [Page] Found {} bubbles.", detections.len());
+    tinfo!("    [Page] Found {} bubbles.", detections.len());
     let orig_rgb = img.to_rgb8();
     let (w_img, h_img) = img.dimensions();
 
@@ -3142,9 +3768,9 @@ async fn translate_page(
                 let detected =
                     kzktdk::preparer::detect_free_text(&orig_rgb, &bubble_boxes, engine.as_ref());
                 if detected.is_empty() {
-                    println!("    [Freetext] 0 regions");
+                    tinfo!("    [Freetext] 0 regions");
                 } else {
-                    println!("    [Freetext] {} regions: {:?}", detected.len(), detected);
+                    tinfo!("    [Freetext] {} regions: {:?}", detected.len(), detected);
                     ft_boxes = detected;
                 }
             }
@@ -3166,10 +3792,11 @@ async fn translate_page(
         });
     }
     if detections.is_empty() && combined_dets.is_empty() {
-        println!("    [Page] No bubbles nor freetext, copying original.");
+        tinfo!("    [Page] No bubbles nor freetext, copying original.");
         img.save(output_path)?;
         return Ok(());
     }
+    emit("detect_end");
 
     // Build crops: bubbles + ft
     let mut crops: Vec<CropItem> = Vec::new();
@@ -3179,7 +3806,7 @@ async fn translate_page(
         if w == 0 || h == 0 {
             continue;
         }
-        println!(
+        tinfo!(
             "      Bubble #{}: [{}, {}, {}, {}] ({}x{})",
             i + 1,
             det.x1,
@@ -3204,7 +3831,7 @@ async fn translate_page(
         let pad = kzktdk::preparer::freetext_pad(*fb, w_img, h_img);
         let w = (pad[2] - pad[0]).max(1);
         let h = (pad[3] - pad[1]).max(1);
-        println!(
+        tinfo!(
             "      Freetext #{}: {:?} padded {:?} ({}x{})",
             i + 1,
             fb,
@@ -3252,7 +3879,7 @@ async fn translate_page(
                 }
             }
             if !raw_map.is_empty() {
-                println!("    [OCR] raw_text {} entries", raw_map.len());
+                tinfo!("    [OCR] raw_text {} entries", raw_map.len());
             }
         }
     }
@@ -3307,19 +3934,28 @@ async fn translate_page(
         json_input: &str,
         prompt: &str,
         target_lang: &str,
+        verbose: bool,
     ) -> Result<std::collections::HashMap<String, String>> {
         let full_prompt = format!(
             "{}\n\nInput JSON (id -> raw Japanese text):\n{}\n\nTranslate each value to {} and return JSON mapping id->translation.",
             prompt, json_input, target_lang
         );
         for prov in chain.all_providers() {
-            println!(
-                "  Translating OCR JSON with {} ({})...",
-                prov.name(),
-                prov.model_name()
-            );
+            if verbose {
+                println!(
+                    "  Translating OCR JSON with {} ({})...",
+                    prov.name(),
+                    prov.model_name()
+                );
+            } else {
+                eprintln!(
+                    "  Translating OCR JSON with {} ({})...",
+                    prov.name(),
+                    prov.model_name()
+                );
+            }
             let raw_res = limiter
-                .execute_with_retry(|| prov.translate_text(json_input, &full_prompt))
+                .execute_with_retry(verbose, || prov.translate_text(json_input, &full_prompt))
                 .await;
             match raw_res {
                 Ok(raw) => {
@@ -3328,10 +3964,18 @@ async fn translate_page(
                             return Ok(norm_map(map));
                         }
                     }
-                    println!("  [Failover] {} unparseable OCR json", prov.name());
+                    if verbose {
+                        println!("  [Failover] {} unparseable OCR json", prov.name());
+                    } else {
+                        eprintln!("  [Failover] {} unparseable OCR json", prov.name());
+                    }
                 }
                 Err(e) => {
-                    println!("  [Failover] {} failed ocr json: {}", prov.name(), e);
+                    if verbose {
+                        println!("  [Failover] {} failed ocr json: {}", prov.name(), e);
+                    } else {
+                        eprintln!("  [Failover] {} failed ocr json: {}", prov.name(), e);
+                    }
                 }
             }
         }
@@ -3339,7 +3983,7 @@ async fn translate_page(
     }
 
     if crops_to_translate.is_empty() {
-        println!("      All served from cache");
+        tinfo!("      All served from cache");
     } else {
         let use_ocr_path = ctx.mode == "ocr" || ctx.mode == "auto";
         let ocr_available = !raw_map.is_empty() || ctx.ocr != "none";
@@ -3365,6 +4009,7 @@ async fn translate_page(
                         ctx.prompt,
                         ctx.target_lang,
                         ctx.rate_limiter,
+                        verbose,
                     )
                     .await?;
                     if let Some(cache) = ctx.cache {
@@ -3389,6 +4034,7 @@ async fn translate_page(
                     &json_str,
                     ctx.prompt,
                     ctx.target_lang,
+                    verbose,
                 )
                 .await
                 {
@@ -3417,6 +4063,7 @@ async fn translate_page(
                                 ctx.prompt,
                                 ctx.target_lang,
                                 ctx.rate_limiter,
+                                verbose,
                             )
                             .await?;
                             if let Some(cache) = ctx.cache {
@@ -3453,6 +4100,7 @@ async fn translate_page(
                         ctx.prompt,
                         ctx.target_lang,
                         ctx.rate_limiter,
+                        verbose,
                     )
                     .await?;
                     if let Some(cache) = ctx.cache {
@@ -3477,6 +4125,7 @@ async fn translate_page(
                     &json_str,
                     ctx.prompt,
                     ctx.target_lang,
+                    verbose,
                 )
                 .await
                 {
@@ -3509,6 +4158,7 @@ async fn translate_page(
                                     ctx.prompt,
                                     ctx.target_lang,
                                     ctx.rate_limiter,
+                                    verbose,
                                 )
                                 .await?;
                                 all_translations.extend(chunk_trans);
@@ -3524,6 +4174,7 @@ async fn translate_page(
                                 ctx.prompt,
                                 ctx.target_lang,
                                 ctx.rate_limiter,
+                                verbose,
                             )
                             .await?;
                             if let Some(cache) = ctx.cache {
@@ -3553,6 +4204,7 @@ async fn translate_page(
                     ctx.prompt,
                     ctx.target_lang,
                     ctx.rate_limiter,
+                    verbose,
                 )
                 .await?;
                 if let Some(cache) = ctx.cache {
@@ -3567,8 +4219,28 @@ async fn translate_page(
 
     // normalize ft keys to lowercase
     all_translations = norm_map(all_translations);
+    // Glossary enforcement (single rewrite retry per leaked term).
+    if let Some(g) = &ctx.glossary {
+        if !g.is_empty() && !all_translations.is_empty() {
+            let (h, m) = kzktdk::translation::enforce_glossary(
+                ctx.chain,
+                ctx.rate_limiter,
+                &mut all_translations,
+                g,
+                ctx.target_lang,
+                verbose,
+            )
+            .await;
+            ctx.gloss_hits.fetch_add(h, Ordering::SeqCst);
+            ctx.gloss_misses.fetch_add(m, Ordering::SeqCst);
+            if m > 0 || h > 0 {
+                tinfo!("      [Glossary] hits={} misses={}", h, m);
+            }
+        }
+    }
+    emit("translate_end");
     for (k, v) in &all_translations {
-        println!("      #{} -> \"{}\"", k, v);
+        tinfo!("      #{} -> \"{}\"", k, v);
     }
 
     // Inpaint + typeset for combined (bubbles + ft)
@@ -3615,6 +4287,7 @@ async fn translate_page(
         }
     }
     page.save(output_path)?;
+    emit("render_end");
 
     if ctx.save_metadata {
         let page_name = input_path
@@ -3663,6 +4336,15 @@ async fn translate_page(
         if ctx.ocr != "none" {
             data.ocr_engine = Some(ctx.ocr.clone());
         }
+        // Initial reading order (manga R2L) so editors open with sane order.
+        {
+            let boxes: Vec<[u32; 4]> = data.bubbles.iter().map(|b| b.bbox).collect();
+            let ord =
+                kzktdk::preparer::detect_reading_order(&boxes, kzktdk::preparer::ReadingMode::R2L);
+            if ord.len() == data.bubbles.len() {
+                data.order = Some(ord.iter().map(|&i| data.bubbles[i].id.clone()).collect());
+            }
+        }
         let meta_dir = ctx
             .metadata_dir
             .clone()
@@ -3676,7 +4358,7 @@ async fn translate_page(
                 .to_string_lossy()
         ));
         metadata::save_page_metadata(&meta_path, &data)?;
-        println!("    [Metadata] Saved to {:?}", meta_path);
+        tinfo!("    [Metadata] Saved to {:?}", meta_path);
     }
     Ok(())
 }

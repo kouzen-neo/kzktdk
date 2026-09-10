@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::inpaint::inpaint_image;
 use crate::metadata::{Bubble, BubbleStyle, PageEditData};
 use crate::model::yolo::Detection;
 use crate::typesetting::Typesetter;
@@ -607,12 +607,15 @@ fn resolve_font_bytes(name: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// Persistent editor session holding fonts in memory.
+/// Persistent editor session holding fonts (and optionally YOLO) in memory.
 ///
 /// Construct once per GUI session to avoid reloading fonts/YOLO per command.
+/// For Tauri, wrap in `std::sync::Mutex` and share via managed state; all
+/// methods are sync and return owned data or base64 PNG (no stdout/exit).
 pub struct EditorSession {
     font_bytes: Vec<u8>,
     cjk_bytes: Option<Vec<u8>>,
+    yolo: Option<crate::model::yolo::YoloModel>,
 }
 
 impl EditorSession {
@@ -622,7 +625,75 @@ impl EditorSession {
         Ok(Self {
             font_bytes,
             cjk_bytes,
+            yolo: None,
         })
+    }
+
+    /// Opens a session with the YOLO bubble detector loaded once.
+    /// Use this for GUI sessions that also run detection/export.
+    pub fn open_model(
+        model_path: &Path,
+        font_bytes: Vec<u8>,
+        cjk_bytes: Option<Vec<u8>>,
+    ) -> Result<Self> {
+        let mut session = Self::new(font_bytes, cjk_bytes)?;
+        session.yolo = Some(crate::model::yolo::YoloModel::new(model_path)?);
+        Ok(session)
+    }
+
+    pub fn has_detector(&self) -> bool {
+        self.yolo.is_some()
+    }
+
+    /// Runs bubble detection with the session-persisted YOLO model.
+    pub fn detect_bubbles(&mut self, img: &image::DynamicImage) -> Result<Vec<Detection>> {
+        let yolo = self
+            .yolo
+            .as_mut()
+            .context("No YOLO model loaded: use EditorSession::open_model")?;
+        yolo.detect_bubbles(img)
+    }
+
+    /// Detects bubbles on an image file and builds an empty `PageEditData`
+    /// (no LLM): the cheap export path for editors.
+    pub fn export_page(&mut self, img_path: &Path) -> Result<PageEditData> {
+        let img =
+            image::open(img_path).with_context(|| format!("Failed to open {:?}", img_path))?;
+        let (w, h) = (img.width(), img.height());
+        let dets = self.detect_bubbles(&img)?;
+        let bubbles: Vec<Bubble> = dets
+            .iter()
+            .enumerate()
+            .map(|(i, d)| Bubble {
+                id: (i + 1).to_string(),
+                bbox: [d.x1, d.y1, d.x2, d.y2],
+                conf: d.conf,
+                translated: String::new(),
+                bg_color: None,
+                style: None,
+                edited: false,
+                raw_text: None,
+                mask_path: None,
+            })
+            .collect();
+        let mut data = PageEditData::new(
+            img_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            w,
+            h,
+            "English".to_string(),
+            "classic".to_string(),
+            bubbles,
+        );
+        let boxes: Vec<[u32; 4]> = data.bubbles.iter().map(|b| b.bbox).collect();
+        let ord = crate::preparer::detect_reading_order(&boxes, crate::preparer::ReadingMode::R2L);
+        if ord.len() == data.bubbles.len() {
+            data.order = Some(ord.iter().map(|&i| data.bubbles[i].id.clone()).collect());
+        }
+        Ok(data)
     }
 
     pub fn load_page(&self, path: &Path) -> Result<PageEditData> {
@@ -633,19 +704,30 @@ impl EditorSession {
     pub fn render_page(&self, img: &RgbImage, data: &PageEditData) -> Result<RgbImage> {
         let mut rgb = img.clone();
         let ordered = data.ordered_bubbles();
-        let dets: Vec<Detection> = ordered
+        let regions: Vec<crate::inpaint::MaskedRegion> = ordered
             .iter()
             .filter(|b| b.translated.to_uppercase() != "SKIP" && !b.translated.trim().is_empty())
-            .map(|b| Detection {
-                x1: b.bbox[0],
-                y1: b.bbox[1],
-                x2: b.bbox[2],
-                y2: b.bbox[3],
-                conf: b.conf,
+            .map(|b| {
+                let det = Detection {
+                    x1: b.bbox[0],
+                    y1: b.bbox[1],
+                    x2: b.bbox[2],
+                    y2: b.bbox[3],
+                    conf: b.conf,
+                };
+                let mask = b.mask_path.as_deref().map(|mp| {
+                    let w = det.width().max(1);
+                    let h = det.height().max(1);
+                    crate::inpaint::load_mask_for(Path::new(mp), w, h)
+                        .with_context(|| format!("Bubble {}: invalid mask {:?}", b.id, mp))
+                });
+                // Fail fast on unreadable/mismatched masks (GUI brush feedback).
+                let mask = mask.transpose()?;
+                Ok(crate::inpaint::MaskedRegion { det, mask })
             })
-            .collect();
-        if !dets.is_empty() {
-            inpaint_image(&mut rgb, &dets)?;
+            .collect::<Result<_>>()?;
+        if !regions.is_empty() {
+            crate::inpaint::inpaint_regions(&mut rgb, &regions)?;
         }
         let global = Typesetter::new(&self.font_bytes, self.cjk_bytes.as_deref())?;
         for b in ordered {
@@ -710,7 +792,25 @@ impl EditorSession {
             y2: bubble.bbox[3],
             conf: bubble.conf,
         };
-        inpaint_image(&mut rgb, &[det.clone()])?;
+        let mask = bubble
+            .mask_path
+            .as_deref()
+            .map(|mp| {
+                crate::inpaint::load_mask_for(
+                    Path::new(mp),
+                    det.width().max(1),
+                    det.height().max(1),
+                )
+                .with_context(|| format!("Bubble {}: invalid mask {:?}", id, mp))
+            })
+            .transpose()?;
+        crate::inpaint::inpaint_regions(
+            &mut rgb,
+            &[crate::inpaint::MaskedRegion {
+                det: det.clone(),
+                mask,
+            }],
+        )?;
         let style_owned;
         let style_ref = if let Some(ov) = style_override {
             style_owned = ov.clone();
@@ -744,6 +844,16 @@ impl EditorSession {
         );
         Ok(rgb)
     }
+}
+
+/// Encode an image as a single-line base64 PNG (for GUI live preview).
+pub fn png_base64(img: &RgbImage) -> Result<String> {
+    let dynimg = image::DynamicImage::ImageRgb8(img.clone());
+    let mut buf = std::io::Cursor::new(Vec::new());
+    dynimg
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .context("Failed to encode PNG")?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
 }
 
 /// Downscale so the longest side is at most `max_side` (for `--thumb`).

@@ -121,3 +121,68 @@ The bundled model (`models/kzkt.dat`) is an obfuscated binary from the KZKT dist
 - **Validation**:
   - The first byte of an ONNX Protobuf payload must match `0x08` (Protobuf tag 1 for `ir_version`).
   - Decrypted header is verified before writing the full model to `models/kzkt.onnx`.
+
+---
+
+## 6. PDF Support (Pdfium)
+
+PDF input/output is implemented in `src/archive.rs` via the `pdfium-render` crate (dynamic binding, no static bundling).
+
+- **Input**: `prepare_input()` accepts `.pdf` → pages are rendered to PNG (`page_0001.png`, target width 1600px) in a `TempDir`, then flow through the normal batch pipeline (`PreparedInput::Batch { is_pdf: true, ... }`).
+- **Output**: `translate --export pdf` (or auto when input is PDF / `-o` ends in `.pdf`) packs translated pages with `create_pdf()` — one full-page image per page, page size = image pixels as points, JPEG quality 90. Default name: `<stem>_translated.pdf`.
+- **Native library resolution** (`bind_pdfium()`): `PDFIUM_LIB_PATH` env var → system library (`libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`). Without it, PDF commands fail with a descriptive error (exit 1), never a panic.
+- `detect` / `metadata export` also accept PDF input (pages become batch images).
+
+---
+
+## 7. GUI Contract (Machine Backend)
+
+Frontend (Tauri v2 + Svelte + Konva.js) drives `kzktdk` without parsing human logs. Conventions:
+
+- **stdout** carries ONLY machine data (JSON / JSON arrays / single-line base64 PNG).
+- **stderr** carries ALL human logs, progress JSONL, and warnings — always, and especially under `--quiet` or `--format json` / `--progress jsonl`.
+- **Exit codes**: `0` ok · `2` invalid data (bad metadata, bad patch, bad glossary, bad mask, failed validation) · `1` system/pipeline errors · `130` cancelled via Ctrl-C.
+
+### 7.1 Schemas
+
+`Bubble` (`src/metadata.rs`): `{id, bbox:[x1,y1,x2,y2], conf, translated, bg_color?, style?, edited, raw_text?, mask_path?}`. `translated == ""` skips rendering; `"SKIP"` (case-insensitive) skips inpaint + typeset. `mask_path` points to a grayscale brush mask (white = inpaint) sized exactly to the bubble crop.
+
+`BubbleStyle` (all optional): `{font_family?, font_size?, text_color?[r,g,b], stroke_color?, align? (left|center|right), is_bold?, is_italic?}`.
+
+`PageEditData` (`.kedit.json`): `{version:1, page, width, height, target_lang, prompt_sig, bubbles[], ocr_engine?, order?}`. `order` lists bubble IDs in reading order; absent = stored order. Old files without `order`/`mask_path`/`raw_text` still load (`serde default`).
+
+`Project` (`project.kedit.json`): `{version:1, pages[], target_lang?, ocr_engine?}`.
+
+`EditPatch` (for `edit --stdin-patch` and `tauri::editor_apply_patch`): `{set[], bbox[], add[], delete[], font_family[], font_size[], text_color[], stroke_color[], align[], edited[], bg_color[], conf[], clear_style[], raw_text[], replace[], apply_style?, bold[], italic[], order? ("1,ft1,2"), mask_path[]}`. Applied transactionally: any error aborts with NO write.
+
+### 7.2 Command surface for GUIs
+
+| Command | Machine output |
+|---|---|
+| `metadata show --format json [--id ID]` | Page/project/bubble JSON to stdout |
+| `metadata validate --format json` | `ValidationReport{valid,kind,errors[{id?,code,msg}],meta}` to stdout; exit 2 when invalid. Codes: `duplicate_id`, `invalid_bbox`, `out_of_bounds`, `unknown_order_id` |
+| `metadata edit --stdin-patch` | Reads `EditPatch` JSON from stdin; stdout `{"ok":true,"logs":[]}` or stderr `{"ok":false,"errors":[],"logs":[]}` + exit 2 (no write) |
+| `metadata preview --to-stdout [--thumb N]` | Single-line base64 PNG to stdout; logs to stderr |
+| `metadata render --progress jsonl` | Per page `{"idx","total","page","out","ok","ms"}` + final `{"done":true,"ok_count","fail_count"}` to stderr |
+| `metadata watch --project --images -o [--once]` | Same JSONL as render, only dirty pages (bubble-hash compare) |
+| `metadata mask --id ID --from mask.png` / `--clear` | Validates mask size = bubble crop; exit 2 on mismatch |
+| `metadata pack --format json` | `{"ok","output","count","files[]}` to stdout |
+| `metadata export --reading-order r2l\|l2r\|off` | Fills `order` from geometry (default `r2l`) |
+| `detect --format json [--quiet]` | `[{page,width,height,bubbles[{id,bbox,conf}],freetext[{id,bbox}]}]` to stdout |
+| `translate --progress jsonl --format json --quiet --glossary G --retry-failed DIR` | Per-phase `{"idx","total","page","phase":"detect_end\|translate_end\|render_end"}` to stderr; final `{"done":true,...}` to stderr; summary `{"ok","files[{idx,file,out,ok,skipped,error}]","ok_count","fail_count","skipped_count","glossary_hits","glossary_misses","output"}` to stdout with `--format json`; exit 1 when any page failed |
+| `font list/get-default --format json` | Registry JSON to stdout |
+
+### 7.3 Full session example
+
+```bash
+kzktdk metadata export page.png --json p.kedit.json
+kzktdk metadata show p.kedit.json --format json
+echo '{"set":["1=Halo"]}' | kzktdk metadata edit p.kedit.json --stdin-patch
+kzktdk metadata preview page.png --metadata p.kedit.json --id 1 --text "Halo" --to-stdout --thumb 512 | base64 -d > prev.png
+kzktdk metadata render page.png --metadata p.kedit.json -o out.jpg --progress jsonl
+kzktdk metadata pack ./rendered -o chapter.cbz --format json
+```
+
+### 7.4 Rust library for Tauri (`src/editor.rs`, `src/tauri.rs`)
+
+`EditorSession::new(fonts)` / `open_model(model, fonts)` (YOLO loaded once) + `detect_bubbles`, `export_page`, `load_page`, `render_page`, `preview_bubble`, helpers `thumbnail`, `png_base64`, `bubbles_hash`. Feature `tauri` gates `src/tauri.rs` wrappers (`editor_load_page`, `editor_apply_patch`, `editor_render_page`, `editor_preview_bubble`, `editor_detect`, `editor_pack_chapter`) returning `Result<T, String>` — attach `#[tauri::command]` in the GUI project. No `println!`, no `process::exit` inside the library.

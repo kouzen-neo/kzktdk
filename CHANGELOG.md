@@ -8,9 +8,28 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ## [Unreleased]
 
 ### Rencana
-- PDF support (`pdfium-render`) — `PDF in → PDF out` (ditunda)
 - Tauri v2 GUI skeleton (Svelte + Konva.js)
 - Hardware acceleration (DirectML/CoreML/CUDA)
+
+---
+
+## [0.1.1-dev.15] - 2026-09-10
+
+Branch: `dev-kz-debug`
+
+### Added
+- **Translate progress & robustness**:
+  - `translate --progress text|jsonl --quiet --format text|json --retry-failed <DIR> --glossary <kamus.json>` — JSONL per fase (`detect_end/translate_end/render_end`) + ringkasan akhir (`files/ok/fail/skipped/glossary_hits/misses/output`) ke stdout bila `--format json`; exit 1 bila ada halaman gagal.
+  - Ctrl-C: selesaikan halaman berjalan, batalkan antrean (`cancelled`), exit 130.
+  - `--retry-failed`: pakai ulang output lama yang bagus (file ada + sidecar berisi terjemahan), hanya halaman gagal yang diterjemahkan ulang.
+  - `TranslationContext` membawa `glossary/progress/quiet/page_idx/total` + counter atomik; `translate_with_chain/repair/RateLimiter` hormati mode senyap (log ke stderr).
+- **Glossary**: `load_glossary()` (validasi 500 entri, anti-duplikat case-insensitive, exit 2) disuntik sebagai blok `GLOSSARY (must obey)` + `enforce_glossary()` rewrite sekali per istilah bocor.
+- **Reading order**: `preparer::detect_reading_order(R2L|L2R)` (kolom + judul jembatan) + `export --reading-order r2l|l2r|off` (default `r2l`); `translate --save-metadata` ikut mengisi `order`.
+- **Mask brush**: `inpaint::{MaskedRegion,load_mask_for,inpaint_regions,inpaint_crop_with_mask}`; `render_page/preview_bubble` memakai `mask_path` (gagal cepat bila ukuran salah); `metadata mask --id --from/--clear` (exit 2 bila invalid).
+- **Tauri binding**: `EditorSession::open_model/detect_bubbles/export_page`, `png_base64()`, modul `src/tauri.rs` (feature `tauri`) berisi wrapper `Result<T,String>` siap-`#[tauri::command]`.
+- **PDF**: `archive::{is_pdf_path,extract_pdf_pages,create_pdf,translated_pdf_name}` via `pdfium-render` (binding `PDFIUM_LIB_PATH` → system lib, error jelas bila absen); `translate --export pdf` + auto bila input/-o `.pdf`; `detect/export` terima PDF.
+- **Machine-readable**: `detect --format json [--quiet]`, `pack --format json`; matriks exit code `0/2/1/130` didokumentasikan.
+- **Tests & docs**: `tests/cli_contract.rs` (11 test: JSON stdout, exit code, kebersihan stream, transaksionalitas, mask, pack, help flags, PDF graceful) + bab `DOCUMENTATION.md §6 PDF` & `§7 GUI Contract`.
 
 ---
 

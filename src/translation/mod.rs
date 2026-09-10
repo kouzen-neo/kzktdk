@@ -84,6 +84,16 @@ impl MosaicBuilder {
 }
 
 pub fn build_translation_prompt(target_lang: &str) -> String {
+    build_translation_prompt_with_glossary(target_lang, None)
+}
+
+/// Glossary-aware prompt builder. `glossary` maps source term -> required
+/// target term (e.g. character names). Injected before custom rules so the
+/// caller can still append `ADDITIONAL RULES` afterwards.
+pub fn build_translation_prompt_with_glossary(
+    target_lang: &str,
+    glossary: Option<&std::collections::BTreeMap<String, String>>,
+) -> String {
     let id_extra = if target_lang.eq_ignore_ascii_case("indonesian")
         || target_lang.eq_ignore_ascii_case("bahasa indonesia")
     {
@@ -100,6 +110,19 @@ pub fn build_translation_prompt(target_lang: &str) -> String {
         r#"{"1": "Hello!", "2": "SKIP", "3": "Let's go!"}"#
     };
 
+    let glossary_block = match glossary {
+        Some(g) if !g.is_empty() => {
+            let mut lines = String::from(
+                "\nGLOSSARY (must obey): Always translate the following terms exactly as given, wherever they appear:\n",
+            );
+            for (src, dst) in g.iter() {
+                lines.push_str(&format!("- \"{}\" -> \"{}\"\n", src, dst));
+            }
+            lines
+        }
+        _ => String::new(),
+    };
+
     format!(
         r#"You are an accurate, natural manga and comic translator translating into {target_lang}.
 The image contains speech bubbles and freetext (captions/SFX) arranged vertically.
@@ -107,7 +130,7 @@ Each item is prefixed with a LARGE RED ID on its left (numeric like "1" for bubb
 
 MAIN TASK:
 Read the dialogue in each item and translate it faithfully into {target_lang}.
-
+{glossary_block}
 RULES:
 1. Natural flow: Use natural conversational manga dialogue suitable for speech bubbles.{id_extra}
 2. Honorifics: Keep Japanese honorifics (san, kun, chan, sama, senpai, etc.) as-is.
@@ -464,7 +487,7 @@ impl RateLimiter {
         }
     }
 
-    pub async fn execute_with_retry<F, Fut>(&self, mut api_call: F) -> Result<String>
+    pub async fn execute_with_retry<F, Fut>(&self, verbose: bool, mut api_call: F) -> Result<String>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<String>>,
@@ -473,12 +496,21 @@ impl RateLimiter {
         for attempt in 0..=self.retry_max {
             if attempt > 0 {
                 let backoff = Duration::from_millis(1000 * (1 << (attempt - 1).min(3)));
-                println!(
-                    "  [RateLimit] Retry {}/{} after {}ms",
-                    attempt,
-                    self.retry_max,
-                    backoff.as_millis()
-                );
+                if verbose {
+                    println!(
+                        "  [RateLimit] Retry {}/{} after {}ms",
+                        attempt,
+                        self.retry_max,
+                        backoff.as_millis()
+                    );
+                } else {
+                    eprintln!(
+                        "  [RateLimit] Retry {}/{} after {}ms",
+                        attempt,
+                        self.retry_max,
+                        backoff.as_millis()
+                    );
+                }
                 tokio::time::sleep(backoff).await;
             }
             // simple token bucket delay
@@ -513,15 +545,21 @@ pub async fn translate_with_chain(
     prompt: &str,
     target_lang: &str,
     rate_limiter: &RateLimiter,
+    verbose: bool,
 ) -> Result<HashMap<String, String>> {
+    macro_rules! cinfo {
+        ($($t:tt)*) => {
+            if verbose { println!($($t)*) } else { eprintln!($($t)*) }
+        };
+    }
     for prov in chain.all_providers() {
-        println!(
+        cinfo!(
             "  Translating with {} ({})...",
             prov.name(),
             prov.model_name()
         );
         let raw_result = rate_limiter
-            .execute_with_retry(|| prov.translate_mosaic_raw(mosaic, prompt))
+            .execute_with_retry(verbose, || prov.translate_mosaic_raw(mosaic, prompt))
             .await;
         match raw_result {
             Ok(raw) => {
@@ -529,22 +567,22 @@ pub async fn translate_with_chain(
                     Ok(map) if !map.is_empty() => return Ok(map),
                     _ => {
                         // Try repair
-                        println!(
+                        cinfo!(
                             "  [!] {} returned unparseable output (raw: {}). Trying repair...",
                             prov.name(),
                             raw.chars().take(80).collect::<String>()
                         );
                         if let Some(repaired) =
-                            repair_json_output(prov, &raw, target_lang, rate_limiter).await
+                            repair_json_output(prov, &raw, target_lang, rate_limiter, verbose).await
                         {
                             if let Ok(map) = parse_translation_json(&repaired) {
                                 if !map.is_empty() {
-                                    println!("  [Repair] {} repair succeeded", prov.name());
+                                    cinfo!("  [Repair] {} repair succeeded", prov.name());
                                     return Ok(map);
                                 }
                             }
                         }
-                        println!(
+                        cinfo!(
                             "  [Failover] {} failed (unparseable). Trying next provider...",
                             prov.name()
                         );
@@ -553,7 +591,7 @@ pub async fn translate_with_chain(
                 }
             }
             Err(e) => {
-                println!(
+                cinfo!(
                     "  [Failover] {} failed ({}). Trying fallback...",
                     prov.name(),
                     e
@@ -570,6 +608,7 @@ async fn repair_json_output(
     raw: &str,
     target_lang: &str,
     rate_limiter: &RateLimiter,
+    verbose: bool,
 ) -> Option<String> {
     if raw.trim().is_empty() {
         return None;
@@ -577,15 +616,177 @@ async fn repair_json_output(
     let repair_prompt = format!(
         "The text below is a translation result in {target_lang} that is not valid JSON. Fix ONLY the JSON syntax/formatting errors and return the exact same translations in {target_lang} as a valid JSON object with the same keys and values. KEEP all translations in {target_lang} — do NOT translate back to English. Output ONLY the corrected JSON object — no markdown, no commentary.\n\nBroken output:\n{raw}"
     );
-    println!("  [!] Requesting JSON repair from {}...", prov.name());
+    if verbose {
+        println!("  [!] Requesting JSON repair from {}...", prov.name());
+    } else {
+        eprintln!("  [!] Requesting JSON repair from {}...", prov.name());
+    }
     let res = rate_limiter
-        .execute_with_retry(|| prov.translate_text(raw, &repair_prompt))
+        .execute_with_retry(verbose, || prov.translate_text(raw, &repair_prompt))
         .await;
     match res {
         Ok(s) => Some(s),
         Err(e) => {
-            println!("  [!] JSON repair failed ({}).", e);
+            if verbose {
+                println!("  [!] JSON repair failed ({}).", e);
+            } else {
+                eprintln!("  [!] JSON repair failed ({}).", e);
+            }
             None
         }
+    }
+}
+
+/// Loads a glossary file: JSON object mapping source term -> required target
+/// term, e.g. `{"Luffy": "Luffy", "海賊王": "Raja Bajak Laut"}`.
+///
+/// Validation (caller should exit 2 on error): object required, keys/values
+/// must be non-empty strings, max 500 entries, no case-insensitive duplicates.
+pub fn load_glossary(path: &std::path::Path) -> Result<std::collections::BTreeMap<String, String>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read glossary {:?}", path))?;
+    let v: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse glossary {:?}", path))?;
+    let obj = v.as_object().with_context(|| {
+        format!(
+            "Invalid glossary {:?}: top level must be a JSON object of term -> translation",
+            path
+        )
+    })?;
+    if obj.len() > 500 {
+        bail!(
+            "Invalid glossary {:?}: max 500 entries, got {}",
+            path,
+            obj.len()
+        );
+    }
+    let mut out = std::collections::BTreeMap::new();
+    let mut seen_lower = std::collections::HashSet::new();
+    for (k, val) in obj {
+        let dst = val.as_str().with_context(|| {
+            format!(
+                "Invalid glossary {:?}: value for {:?} must be a string",
+                path, k
+            )
+        })?;
+        if k.trim().is_empty() || dst.trim().is_empty() {
+            bail!(
+                "Invalid glossary {:?}: empty term or translation near {:?}",
+                path,
+                k
+            );
+        }
+        if !seen_lower.insert(k.to_lowercase()) {
+            bail!(
+                "Invalid glossary {:?}: duplicate term (case-insensitive) {:?}",
+                path,
+                k
+            );
+        }
+        out.insert(k.clone(), dst.to_string());
+    }
+    if out.is_empty() {
+        bail!("Invalid glossary {:?}: no entries", path);
+    }
+    Ok(out)
+}
+
+fn contains_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+/// Enforces glossary compliance on `translations` in place.
+///
+/// Returns `(hits, misses)`: compliant (term, bubble) pairs vs. pairs where
+/// the source term leaked through and a single rewrite retry failed.
+pub async fn enforce_glossary(
+    chain: &ProviderChain,
+    limiter: &RateLimiter,
+    translations: &mut HashMap<String, String>,
+    glossary: &std::collections::BTreeMap<String, String>,
+    target_lang: &str,
+    verbose: bool,
+) -> (usize, usize) {
+    let mut hits = 0usize;
+    let mut misses = 0usize;
+    // Deterministic order for stable logs.
+    let mut ids: Vec<String> = translations.keys().cloned().collect();
+    ids.sort();
+    for id in ids {
+        let text = translations.get(&id).cloned().unwrap_or_default();
+        if text.to_uppercase() == "SKIP" || text.trim().is_empty() {
+            continue;
+        }
+        for (src, dst) in glossary.iter() {
+            if contains_insensitive(&text, src) && !text.contains(dst) {
+                let rewrite_prompt = format!(
+                    "Rewrite the following {target_lang} manga dialogue so that every occurrence of \"{src}\" becomes \"{dst}\". Keep everything else identical. Output ONLY the rewritten text, no quotes, no commentary.\n\n{text}"
+                );
+                let mut fixed = false;
+                for prov in chain.all_providers() {
+                    match limiter
+                        .execute_with_retry(verbose, || prov.translate_text(&text, &rewrite_prompt))
+                        .await
+                    {
+                        Ok(s) if !s.trim().is_empty() => {
+                            translations.insert(id.clone(), s.trim().to_string());
+                            fixed = true;
+                            break;
+                        }
+                        _ => continue,
+                    }
+                }
+                let now = translations.get(&id).cloned().unwrap_or_default();
+                if fixed && (!contains_insensitive(&now, src) || now.contains(dst)) {
+                    hits += 1;
+                } else {
+                    eprintln!(
+                        "  [Glossary] miss: term {:?} leaked in #{} even after rewrite",
+                        src, id
+                    );
+                    misses += 1;
+                }
+            } else {
+                hits += 1;
+            }
+        }
+    }
+    (hits, misses)
+}
+
+#[cfg(test)]
+mod glossary_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_contains_glossary_block() {
+        let mut g = std::collections::BTreeMap::new();
+        g.insert("Luffy".to_string(), "Luffy".to_string());
+        let p = build_translation_prompt_with_glossary("Indonesian", Some(&g));
+        assert!(p.contains("GLOSSARY (must obey)"));
+        assert!(p.contains("\"Luffy\" -> \"Luffy\""));
+        let plain = build_translation_prompt("Indonesian");
+        assert!(!plain.contains("GLOSSARY"));
+    }
+
+    #[test]
+    fn load_glossary_rejects_bad_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "[1,2]").unwrap();
+        assert!(load_glossary(&bad).is_err());
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, "{}").unwrap();
+        assert!(load_glossary(&empty).is_err());
+        let dup = dir.path().join("dup.json");
+        std::fs::write(&dup, r#"{"Luffy": "Luffy", "luffy": "Luffy"}"#).unwrap();
+        assert!(load_glossary(&dup).is_err());
+        let ok = dir.path().join("ok.json");
+        std::fs::write(&ok, r#"{"Luffy": "Luffy"}"#).unwrap();
+        let g = load_glossary(&ok).unwrap();
+        assert_eq!(g.get("Luffy").unwrap(), "Luffy");
     }
 }
