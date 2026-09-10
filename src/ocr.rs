@@ -1,4 +1,4 @@
-use image::{DynamicImage, GenericImageView, RgbImage, imageops::FilterType};
+use image::{DynamicImage, RgbImage, imageops::FilterType};
 use ndarray::Array4;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -305,9 +305,130 @@ fn rapid_detect_ort(
     Ok(regs)
 }
 fn rapid_recognize_crop(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path) -> Option<String> {
-    let _ = (img, bbox, rec, dict);
-    // TODO real rec: crop resize 32x, ort rec session, dict decode (tracked: ensure_rec_available)
-    None
+    let (x1, y1, x2, y2) = (bbox[0], bbox[1], bbox[2], bbox[3]);
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    let w = x2 - x1;
+    let h = y2 - y1;
+    if w < 4 || h < 4 {
+        return None;
+    }
+    
+    // Crop
+    let crop = image::imageops::crop_imm(img, x1, y1, w, h).to_image();
+    
+    // Check if vertical (tategaki): rotate 90 degrees
+    let crop = if h > w {
+        image::imageops::rotate90(&crop)
+    } else {
+        crop
+    };
+    
+    // Resize to height 32, keep aspect ratio, pad right
+    let (cw, ch) = (crop.width(), crop.height());
+    let target_h = 32u32;
+    let scale = target_h as f32 / ch as f32;
+    let new_w = (cw as f32 * scale).round() as u32;
+    let resized = image::imageops::resize(&crop, new_w, target_h, FilterType::Triangle);
+    
+    // Pad to at least 32 width (common models accept variable width, but normalize)
+    let padded_w = new_w.max(32);
+    let mut padded = RgbImage::from_pixel(padded_w, target_h, image::Rgb([255, 255, 255]));
+    image::imageops::overlay(&mut padded, &resized, 0, 0);
+    
+    // Normalize to [0,1] with mean/std 0.5 (simple normalization for now)
+    let mut tensor = ndarray::Array4::<f32>::zeros((1, 3, target_h as usize, padded_w as usize));
+    for y in 0..target_h {
+        for x in 0..padded_w {
+            let p = padded.get_pixel(x, y);
+            for c in 0..3 {
+                tensor[[0, c, y as usize, x as usize]] = (p[c] as f32 / 255.0 - 0.5) / 0.5;
+            }
+        }
+    }
+    
+    // Load dict
+    let dict_content = std::fs::read_to_string(dict).ok()?;
+    let dict_chars: Vec<&str> = dict_content.lines().collect();
+    let num_classes = dict_chars.len() + 1; // +1 for blank
+    
+    // ORT session
+    let mut sess = Session::builder().ok()?.commit_from_file(rec).ok()?;
+    let input = Tensor::from_array(tensor).ok()?;
+    let outputs = sess.run(ort::inputs![input]).ok()?;
+    let (_, val) = outputs.into_iter().next()?;
+    let (shape, data) = val.try_extract_tensor::<f32>().ok()?;
+    
+    // Shape typically [T, 1, num_classes] or [1, T, num_classes]
+    let (t_steps, classes) = if shape.len() == 3 {
+        if shape[1] == 1 {
+            (shape[0] as usize, shape[2] as usize)
+        } else {
+            (shape[1] as usize, shape[2] as usize)
+        }
+    } else if shape.len() == 2 {
+        (shape[0] as usize, shape[1] as usize)
+    } else {
+        return None;
+    };
+    
+    // Assert compatibility
+    if classes != num_classes {
+        eprintln!(
+            "[rapid] dict/model mismatch: dict {} + blank = {}, model output = {}",
+            dict_chars.len(), num_classes, classes
+        );
+        return None;
+    }
+    
+    // CTC decode: argmax + collapse
+    let mut indices = Vec::new();
+    let mut confidences = Vec::new();
+    for t in 0..t_steps {
+        let offset = if shape.len() == 3 && shape[1] == 1 {
+            t * classes
+        } else if shape.len() == 3 {
+            t * classes
+        } else {
+            t * classes
+        };
+        
+        let mut max_idx = 0;
+        let mut max_val = data[offset];
+        for c in 1..classes {
+            let v = data[offset + c];
+            if v > max_val {
+                max_val = v;
+                max_idx = c;
+            }
+        }
+        indices.push(max_idx);
+        confidences.push(max_val);
+    }
+    
+    // Collapse: remove blank (0) and consecutive duplicates
+    let mut result = String::new();
+    let mut prev = None;
+    for &idx in &indices {
+        if idx == 0 {
+            prev = None;
+            continue;
+        }
+        if Some(idx) == prev {
+            continue;
+        }
+        prev = Some(idx);
+        if idx > 0 && idx <= dict_chars.len() {
+            result.push_str(dict_chars[idx - 1]);
+        }
+    }
+    
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 pub struct MangaOcr {

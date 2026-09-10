@@ -193,8 +193,7 @@ pub async fn translate_page(
         if ctx.ocr == "none" {
             eprintln!("[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only");
         } else {
-            let script = crate::ocr::OcrScript::from_key(&ctx.ocr_script);
-            let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), script);
+            let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
             if engine.name() == "none" {
                 eprintln!("[freetext] engine none, skip freetext");
             } else {
@@ -291,8 +290,7 @@ pub async fn translate_page(
     // --- OCR raw_text gathering (for metadata) ---
     let mut raw_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if ctx.ocr != "none" {
-        let script = crate::ocr::OcrScript::from_key(&ctx.ocr_script);
-        let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), script);
+        let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
         if engine.name() != "none" {
             // recognize per crop (bubble + ft)
             for c in &crops {
