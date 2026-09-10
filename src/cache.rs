@@ -71,7 +71,9 @@ impl TranslationCache {
             );
             CREATE INDEX IF NOT EXISTS idx_lookup ON translations(image_hash, target_lang);",
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -88,7 +90,9 @@ impl TranslationCache {
                 PRIMARY KEY (image_hash, target_lang, provider, model, prompt_sig)
             );",
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn get(

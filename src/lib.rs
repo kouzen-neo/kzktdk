@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod cache;
+pub mod editor;
 pub mod font;
 pub mod inpaint;
 pub mod metadata;

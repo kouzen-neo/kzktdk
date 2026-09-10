@@ -1,8 +1,12 @@
 use anyhow::{Context, Result, bail};
+use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use image::{GenericImageView, Rgb, RgbImage};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use kzktdk::archive::{self, PreparedInput};
 use kzktdk::cache::{TranslationCache, prompt_signature};
@@ -10,7 +14,10 @@ use kzktdk::inpaint::inpaint_image;
 use kzktdk::metadata::{self, PageEditData};
 use kzktdk::model::decrypt::decrypt_model;
 use kzktdk::model::yolo::YoloModel;
-use kzktdk::translation::{CropItem, MosaicBuilder, Provider, ProviderChain, RateLimiter, build_translation_prompt, translate_with_chain};
+use kzktdk::translation::{
+    CropItem, MosaicBuilder, Provider, ProviderChain, RateLimiter, build_translation_prompt,
+    translate_with_chain,
+};
 use kzktdk::typesetting::Typesetter;
 
 const MAIN_HELP_TEMPLATE: &str = "\
@@ -31,7 +38,9 @@ Usage:
   kzktdk metadata render <image> --metadata page.kedit.json -o out.jpg
   kzktdk metadata render --project project.kedit.json --images orig/ -o rendered/ --jobs auto
   kzktdk metadata preview <image> --metadata page.kedit.json --id 1 --text \"Hi\" -o prev.jpg
+  kzktdk metadata preview <image> --metadata page.kedit.json --id 1 --text \"Hi\" --to-stdout --thumb 512
   kzktdk metadata show <json> [--id 1]           Show bubbles table
+  kzktdk metadata watch --project project.kedit.json --images orig/ -o rendered/ --once
   kzktdk metadata pack <folder_rendered/> -o chapter.cbz
   kzktdk font list / import <path> / set-default <name>
 
@@ -274,6 +283,12 @@ enum MetadataCmd {
         /// Jobs for batch render (auto or N)
         #[arg(long, default_value = "auto")]
         jobs: String,
+        /// Progress output: text or jsonl (JSON lines to stderr)
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "jsonl"]))]
+        progress: String,
+        /// Suppress informational logs (data goes to stdout, logs to stderr)
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
     },
     /// Preview single bubble text without saving JSON (for live editor)
     Preview {
@@ -288,9 +303,15 @@ enum MetadataCmd {
         /// New text to preview
         #[arg(long)]
         text: String,
-        /// Output preview image
+        /// Output preview image (required unless --to-stdout)
         #[arg(short, long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
+        /// Print PNG as single-line base64 to stdout instead of writing a file
+        #[arg(long, default_value_t = false)]
+        to_stdout: bool,
+        /// Downscale longest side to N px before encoding (0 = no resize)
+        #[arg(long, default_value_t = 0)]
+        thumb: u32,
         /// Font path
         #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
         font: PathBuf,
@@ -315,6 +336,9 @@ enum MetadataCmd {
         /// Show raw_text instead of translated when available
         #[arg(long)]
         show_raw: bool,
+        /// Suppress informational logs (data goes to stdout, logs to stderr)
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
     },
     /// Edit metadata JSON (set translated text or bbox)
     Edit {
@@ -374,11 +398,26 @@ enum MetadataCmd {
         /// Set italic per bubble: "ID=true/false" (can repeat, empty to clear)
         #[arg(long, value_name = "ID=Bool")]
         italic: Vec<String>,
+        /// Transactional JSON patch from stdin (EditPatch); aborts without writing on any error
+        #[arg(long, default_value_t = false)]
+        stdin_patch: bool,
+        /// Set reading order: "1,ft1,2" (comma-separated bubble IDs)
+        #[arg(long, value_name = "ORDER")]
+        order: Option<String>,
+        /// Set mask override per bubble: "ID=/path/to/mask.png" (empty to clear)
+        #[arg(long, value_name = "ID=Path")]
+        mask_path: Vec<String>,
     },
     /// Validate metadata JSON
     Validate {
         /// JSON file to validate
         json: PathBuf,
+        /// Output format: text or json
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+        format: String,
+        /// Suppress informational logs (data goes to stdout, logs to stderr)
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
     },
     /// Show metadata as table (auto-detect PageEditData or Project)
     Show {
@@ -387,6 +426,12 @@ enum MetadataCmd {
         /// Filter by bubble ID (only for PageEditData)
         #[arg(long)]
         id: Option<String>,
+        /// Output format: text (table) or json (raw metadata)
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+        format: String,
+        /// Suppress informational logs (data goes to stdout, logs to stderr)
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
     },
     /// Pack rendered folder into CBZ archive
     Pack {
@@ -395,6 +440,30 @@ enum MetadataCmd {
         /// Output CBZ file
         #[arg(short, long)]
         output: PathBuf,
+    },
+    /// Watch project for changes and incrementally re-render dirty pages
+    Watch {
+        /// Project JSON file
+        #[arg(long)]
+        project: PathBuf,
+        /// Images folder (overrides project image paths)
+        #[arg(long)]
+        images: Option<PathBuf>,
+        /// Output folder for rendered pages
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Font path
+        #[arg(short, long, default_value = "fonts/Komika Axis.ttf")]
+        font: PathBuf,
+        /// CJK font path
+        #[arg(long, default_value = "fonts/KosugiMaru.ttf")]
+        cjk_font: PathBuf,
+        /// Poll interval in seconds
+        #[arg(long, default_value_t = 1)]
+        interval: u64,
+        /// Render once and exit (for scripts/tests)
+        #[arg(long, default_value_t = false)]
+        once: bool,
     },
 }
 
@@ -409,7 +478,14 @@ enum FontCmd {
         name: Option<String>,
     },
     /// List imported fonts
-    List,
+    List {
+        /// Output format: text or json
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+        format: String,
+        /// Suppress informational logs
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
+    },
     /// Remove font from registry
     Remove {
         /// Font name
@@ -424,7 +500,14 @@ enum FontCmd {
         cjk: bool,
     },
     /// Get default font
-    GetDefault,
+    GetDefault {
+        /// Output format: text or json
+        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+        format: String,
+        /// Suppress informational logs
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
+    },
 }
 
 fn find_file_in_candidates(relative: &str) -> Option<PathBuf> {
@@ -612,103 +695,266 @@ async fn main() -> Result<()> {
             let prepared = archive::prepare_input(&input)?;
             match prepared {
                 PreparedInput::SingleImage(img_path) => {
-                    let out_path = output.clone().unwrap_or_else(|| PathBuf::from("detected.png"));
+                    let out_path = output
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("detected.png"));
                     // If output is a directory, place file inside
-                    let out_path = if out_path.is_dir() || out_path.to_string_lossy().ends_with('/') {
+                    let out_path = if out_path.is_dir() || out_path.to_string_lossy().ends_with('/')
+                    {
                         std::fs::create_dir_all(&out_path)?;
                         out_path.join(img_path.file_name().unwrap())
                     } else {
-                        if let Some(parent) = out_path.parent() { std::fs::create_dir_all(parent)?; }
+                        if let Some(parent) = out_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
                         out_path
                     };
                     println!("[2/2] Detecting bubbles on {:?}...", img_path);
-                    let img = image::open(&img_path).with_context(|| format!("Failed to open {:?}", img_path))?;
+                    let img = image::open(&img_path)
+                        .with_context(|| format!("Failed to open {:?}", img_path))?;
                     let (w, h) = (img.width(), img.height());
                     let mut detections = yolo.detect_bubbles(&img)?;
                     println!("Found {} speech bubbles.", detections.len());
                     // freetext
-                    let mut ft_boxes: Vec<[u32;4]> = Vec::new();
+                    let mut ft_boxes: Vec<[u32; 4]> = Vec::new();
                     if translate_free_text {
                         if ocr == "none" {
-                            eprintln!("[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only");
+                            eprintln!(
+                                "[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only"
+                            );
                         } else {
                             let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
-                            let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                            let engine =
+                                kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
                             if engine.name() != "none" {
-                                let bubble_boxes: Vec<[u32;4]> = detections.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
-                                ft_boxes = kzktdk::preparer::detect_free_text(&img.to_rgb8(), &bubble_boxes, engine.as_ref());
+                                let bubble_boxes: Vec<[u32; 4]> = detections
+                                    .iter()
+                                    .map(|d| [d.x1, d.y1, d.x2, d.y2])
+                                    .collect();
+                                ft_boxes = kzktdk::preparer::detect_free_text(
+                                    &img.to_rgb8(),
+                                    &bubble_boxes,
+                                    engine.as_ref(),
+                                );
                                 println!("Found {} freetext regions.", ft_boxes.len());
                             }
                         }
                     }
                     let mut rgb_img = img.to_rgb8();
                     for (idx, det) in detections.iter().enumerate() {
-                        println!("  Bubble #{}: [{}, {}, {}, {}] (conf: {:.2})", idx+1, det.x1, det.y1, det.x2, det.y2, det.conf);
-                        draw_rect(&mut rgb_img, det.x1, det.y1, det.x2, det.y2, Rgb([255,0,0]), 2);
+                        println!(
+                            "  Bubble #{}: [{}, {}, {}, {}] (conf: {:.2})",
+                            idx + 1,
+                            det.x1,
+                            det.y1,
+                            det.x2,
+                            det.y2,
+                            det.conf
+                        );
+                        draw_rect(
+                            &mut rgb_img,
+                            det.x1,
+                            det.y1,
+                            det.x2,
+                            det.y2,
+                            Rgb([255, 0, 0]),
+                            2,
+                        );
                     }
                     for (idx, fb) in ft_boxes.iter().enumerate() {
-                        println!("  Freetext #{}: [{},{},{},{}]", idx+1, fb[0],fb[1],fb[2],fb[3]);
-                        draw_rect(&mut rgb_img, fb[0],fb[1],fb[2],fb[3], Rgb([0,200,0]), 2);
+                        println!(
+                            "  Freetext #{}: [{},{},{},{}]",
+                            idx + 1,
+                            fb[0],
+                            fb[1],
+                            fb[2],
+                            fb[3]
+                        );
+                        draw_rect(
+                            &mut rgb_img,
+                            fb[0],
+                            fb[1],
+                            fb[2],
+                            fb[3],
+                            Rgb([0, 200, 0]),
+                            2,
+                        );
                     }
                     rgb_img.save(&out_path)?;
                     println!("Saved detection preview to {:?}", out_path);
                     if let Some(json_path) = json {
-                        let mut bubbles: Vec<metadata::Bubble> = detections.iter().enumerate().map(|(i,d)| metadata::Bubble {
-                            id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None
-                        }).collect();
+                        let mut bubbles: Vec<metadata::Bubble> = detections
+                            .iter()
+                            .enumerate()
+                            .map(|(i, d)| metadata::Bubble {
+                                id: (i + 1).to_string(),
+                                bbox: [d.x1, d.y1, d.x2, d.y2],
+                                conf: d.conf,
+                                translated: String::new(),
+                                bg_color: None,
+                                style: None,
+                                edited: false,
+                                raw_text: None,
+                                mask_path: None,
+                            })
+                            .collect();
                         for (i, fb) in ft_boxes.iter().enumerate() {
-                            bubbles.push(metadata::Bubble { id: format!("ft{}", i+1), bbox: *fb, conf: 0.90, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None });
+                            bubbles.push(metadata::Bubble {
+                                id: format!("ft{}", i + 1),
+                                bbox: *fb,
+                                conf: 0.90,
+                                translated: String::new(),
+                                bg_color: None,
+                                style: None,
+                                edited: false,
+                                raw_text: None,
+                                mask_path: None,
+                            });
                         }
                         let mut data = metadata::PageEditData::new(
                             img_path.file_name().unwrap().to_string_lossy().to_string(),
-                            w, h, "English".to_string(), "classic".to_string(),
-                            bubbles
+                            w,
+                            h,
+                            "English".to_string(),
+                            "classic".to_string(),
+                            bubbles,
                         );
-                        if ocr != "none" { data.ocr_engine = Some(ocr.clone()); }
+                        if ocr != "none" {
+                            data.ocr_engine = Some(ocr.clone());
+                        }
                         metadata::save_page_metadata(&json_path, &data)?;
                         println!("Saved JSON to {:?}", json_path);
                     }
                 }
-                PreparedInput::Batch { images, _temp_guard: _, is_archive: _, original_name } => {
+                PreparedInput::Batch {
+                    images,
+                    _temp_guard: _,
+                    is_archive: _,
+                    original_name,
+                } => {
                     let out_dir = output.unwrap_or_else(|| PathBuf::from("detected"));
                     std::fs::create_dir_all(&out_dir)?;
-                    println!("[2/2] Detecting bubbles on {} pages (jobs={})...", images.len(), jobs_num);
+                    println!(
+                        "[2/2] Detecting bubbles on {} pages (jobs={})...",
+                        images.len(),
+                        jobs_num
+                    );
                     let mut all_pages = Vec::new();
-                    let make_page_with_ft = |p: &PathBuf, dets: Vec<kzktdk::model::yolo::Detection>, w: u32, h: u32, rgb_ref: &RgbImage| -> metadata::PageEditData {
-                        let mut ft_boxes: Vec<[u32;4]> = Vec::new();
+                    let make_page_with_ft = |p: &PathBuf,
+                                             dets: Vec<kzktdk::model::yolo::Detection>,
+                                             w: u32,
+                                             h: u32,
+                                             rgb_ref: &RgbImage|
+                     -> metadata::PageEditData {
+                        let mut ft_boxes: Vec<[u32; 4]> = Vec::new();
                         if translate_free_text && ocr != "none" {
                             let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
-                            let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                            let engine =
+                                kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
                             if engine.name() != "none" {
-                                let bboxes: Vec<[u32;4]> = dets.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
-                                ft_boxes = kzktdk::preparer::detect_free_text(rgb_ref, &bboxes, engine.as_ref());
+                                let bboxes: Vec<[u32; 4]> =
+                                    dets.iter().map(|d| [d.x1, d.y1, d.x2, d.y2]).collect();
+                                ft_boxes = kzktdk::preparer::detect_free_text(
+                                    rgb_ref,
+                                    &bboxes,
+                                    engine.as_ref(),
+                                );
                             }
                         }
-                        let mut bubbles: Vec<metadata::Bubble> = dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect();
+                        let mut bubbles: Vec<metadata::Bubble> = dets
+                            .iter()
+                            .enumerate()
+                            .map(|(i, d)| metadata::Bubble {
+                                id: (i + 1).to_string(),
+                                bbox: [d.x1, d.y1, d.x2, d.y2],
+                                conf: d.conf,
+                                translated: String::new(),
+                                bg_color: None,
+                                style: None,
+                                edited: false,
+                                raw_text: None,
+                                mask_path: None,
+                            })
+                            .collect();
                         for (i, fb) in ft_boxes.iter().enumerate() {
-                            bubbles.push(metadata::Bubble { id: format!("ft{}", i+1), bbox: *fb, conf: 0.90, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None });
+                            bubbles.push(metadata::Bubble {
+                                id: format!("ft{}", i + 1),
+                                bbox: *fb,
+                                conf: 0.90,
+                                translated: String::new(),
+                                bg_color: None,
+                                style: None,
+                                edited: false,
+                                raw_text: None,
+                                mask_path: None,
+                            });
                         }
-                        let mut data = metadata::PageEditData::new(p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(), bubbles);
-                        if ocr != "none" { data.ocr_engine = Some(ocr.clone()); }
+                        let mut data = metadata::PageEditData::new(
+                            p.file_name().unwrap().to_string_lossy().to_string(),
+                            w,
+                            h,
+                            "English".to_string(),
+                            "classic".to_string(),
+                            bubbles,
+                        );
+                        if ocr != "none" {
+                            data.ocr_engine = Some(ocr.clone());
+                        }
                         data
                     };
                     if jobs_num <= 1 {
                         for (idx, p) in images.iter().enumerate() {
-                            let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
-                            let (w,h) = (img.width(), img.height());
+                            let img = image::open(p)
+                                .with_context(|| format!("Failed to open {:?}", p))?;
+                            let (w, h) = (img.width(), img.height());
                             let dets = yolo.detect_bubbles(&img)?;
-                            println!("[Page {}/{}] {:?}: {} bubbles", idx+1, images.len(), p.file_name().unwrap(), dets.len());
+                            println!(
+                                "[Page {}/{}] {:?}: {} bubbles",
+                                idx + 1,
+                                images.len(),
+                                p.file_name().unwrap(),
+                                dets.len()
+                            );
                             let rgb = img.to_rgb8();
                             let mut rgb_out = rgb.clone();
-                            for d in &dets { draw_rect(&mut rgb_out, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            for d in &dets {
+                                draw_rect(
+                                    &mut rgb_out,
+                                    d.x1,
+                                    d.y1,
+                                    d.x2,
+                                    d.y2,
+                                    Rgb([255, 0, 0]),
+                                    2,
+                                );
+                            }
                             // also draw ft
                             if translate_free_text && ocr != "none" {
                                 let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
-                                let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                                let engine = kzktdk::ocr::create_ocr_engine(
+                                    &ocr,
+                                    ocr_model.as_deref(),
+                                    script,
+                                );
                                 if engine.name() != "none" {
-                                    let bboxes: Vec<[u32;4]> = dets.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
-                                    let fts = kzktdk::preparer::detect_free_text(&rgb, &bboxes, engine.as_ref());
-                                    for fb in &fts { draw_rect(&mut rgb_out, fb[0],fb[1],fb[2],fb[3], Rgb([0,200,0]), 2); }
+                                    let bboxes: Vec<[u32; 4]> =
+                                        dets.iter().map(|d| [d.x1, d.y1, d.x2, d.y2]).collect();
+                                    let fts = kzktdk::preparer::detect_free_text(
+                                        &rgb,
+                                        &bboxes,
+                                        engine.as_ref(),
+                                    );
+                                    for fb in &fts {
+                                        draw_rect(
+                                            &mut rgb_out,
+                                            fb[0],
+                                            fb[1],
+                                            fb[2],
+                                            fb[3],
+                                            Rgb([0, 200, 0]),
+                                            2,
+                                        );
+                                    }
                                 }
                             }
                             let out = out_dir.join(p.file_name().unwrap());
@@ -720,20 +966,56 @@ async fn main() -> Result<()> {
                     } else {
                         // For batch detect, sequential yolo is fine; parallel would need Send. Keep sequential for now with progress.
                         for (idx, p) in images.iter().enumerate() {
-                            let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
-                            let (w,h) = (img.width(), img.height());
+                            let img = image::open(p)
+                                .with_context(|| format!("Failed to open {:?}", p))?;
+                            let (w, h) = (img.width(), img.height());
                             let dets = yolo.detect_bubbles(&img)?;
-                            println!("[Page {}/{}] {:?}: {} bubbles", idx+1, images.len(), p.file_name().unwrap(), dets.len());
+                            println!(
+                                "[Page {}/{}] {:?}: {} bubbles",
+                                idx + 1,
+                                images.len(),
+                                p.file_name().unwrap(),
+                                dets.len()
+                            );
                             let rgb = img.to_rgb8();
                             let mut rgb_out = rgb.clone();
-                            for d in &dets { draw_rect(&mut rgb_out, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            for d in &dets {
+                                draw_rect(
+                                    &mut rgb_out,
+                                    d.x1,
+                                    d.y1,
+                                    d.x2,
+                                    d.y2,
+                                    Rgb([255, 0, 0]),
+                                    2,
+                                );
+                            }
                             if translate_free_text && ocr != "none" {
                                 let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
-                                let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                                let engine = kzktdk::ocr::create_ocr_engine(
+                                    &ocr,
+                                    ocr_model.as_deref(),
+                                    script,
+                                );
                                 if engine.name() != "none" {
-                                    let bboxes: Vec<[u32;4]> = dets.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
-                                    let fts = kzktdk::preparer::detect_free_text(&rgb, &bboxes, engine.as_ref());
-                                    for fb in &fts { draw_rect(&mut rgb_out, fb[0],fb[1],fb[2],fb[3], Rgb([0,200,0]), 2); }
+                                    let bboxes: Vec<[u32; 4]> =
+                                        dets.iter().map(|d| [d.x1, d.y1, d.x2, d.y2]).collect();
+                                    let fts = kzktdk::preparer::detect_free_text(
+                                        &rgb,
+                                        &bboxes,
+                                        engine.as_ref(),
+                                    );
+                                    for fb in &fts {
+                                        draw_rect(
+                                            &mut rgb_out,
+                                            fb[0],
+                                            fb[1],
+                                            fb[2],
+                                            fb[3],
+                                            Rgb([0, 200, 0]),
+                                            2,
+                                        );
+                                    }
                                 }
                             }
                             let out = out_dir.join(p.file_name().unwrap());
@@ -839,15 +1121,29 @@ async fn main() -> Result<()> {
                         // Read from registry path
                         let list = kzktdk::font::FontRegistry::list();
                         if let Some(info) = list.iter().find(|f| f.name == font_str) {
-                            if let Ok(b) = std::fs::read(&info.path) { b } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
-                        } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                            if let Ok(b) = std::fs::read(&info.path) {
+                                b
+                            } else {
+                                include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                            }
+                        } else {
+                            include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                        }
                     } else if let Some(def) = kzktdk::font::AppConfig::get_latin() {
                         if kzktdk::font::FontRegistry::resolve(&def).is_ok() {
                             let list = kzktdk::font::FontRegistry::list();
                             if let Some(info) = list.iter().find(|f| f.name == def) {
-                                if let Ok(b) = std::fs::read(&info.path) { b } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
-                            } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
-                        } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
+                                if let Ok(b) = std::fs::read(&info.path) {
+                                    b
+                                } else {
+                                    include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                                }
+                            } else {
+                                include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                            }
+                        } else {
+                            include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                        }
                     } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
                         std::fs::read(p)?
                     } else {
@@ -866,18 +1162,26 @@ async fn main() -> Result<()> {
                 std::fs::read(&cjk_font).ok()
             } else {
                 let cjk_str = cjk_font.to_string_lossy().to_string();
-                if !cjk_str.is_empty() && !cjk_str.contains('/') && !cjk_str.contains('\\') && kzktdk::font::FontRegistry::resolve(&cjk_str).is_ok() {
+                if !cjk_str.is_empty()
+                    && !cjk_str.contains('/')
+                    && !cjk_str.contains('\\')
+                    && kzktdk::font::FontRegistry::resolve(&cjk_str).is_ok()
+                {
                     let list = kzktdk::font::FontRegistry::list();
                     if let Some(info) = list.iter().find(|f| f.name == cjk_str) {
                         std::fs::read(&info.path).ok()
-                    } else { None }
+                    } else {
+                        None
+                    }
                 } else if let Some(def) = kzktdk::font::AppConfig::get_cjk() {
                     let list = kzktdk::font::FontRegistry::list();
                     if let Some(info) = list.iter().find(|f| f.name == def) {
                         std::fs::read(&info.path).ok()
                     } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
                         std::fs::read(p).ok()
-                    } else { None }
+                    } else {
+                        None
+                    }
                 } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
                     std::fs::read(p).ok()
                 } else {
@@ -897,7 +1201,11 @@ async fn main() -> Result<()> {
             )?;
             let mut fallbacks = Vec::new();
             if let Some(ref fb_str) = fallback_provider {
-                for fb_name in fb_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                for fb_name in fb_str
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
                     // avoid duplicate primary
                     if fb_name.eq_ignore_ascii_case(&provider) {
                         continue;
@@ -917,13 +1225,13 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            let provider_chain = ProviderChain {
-                primary,
-                fallbacks,
-            };
+            let provider_chain = ProviderChain { primary, fallbacks };
             let rate_limiter = RateLimiter::new(rate_limit);
             let jobs_num = parse_jobs(&jobs);
-            println!("  Jobs: {} (batch parallel), RateLimit: {} RPS", jobs_num, rate_limit);
+            println!(
+                "  Jobs: {} (batch parallel), RateLimit: {} RPS",
+                jobs_num, rate_limit
+            );
             if !provider_chain.fallbacks.is_empty() {
                 let fb_names: Vec<_> = provider_chain.fallbacks.iter().map(|p| p.name()).collect();
                 println!("  Fallbacks: {}", fb_names.join(", "));
@@ -992,9 +1300,14 @@ async fn main() -> Result<()> {
 
                     // Save project.kedit.json for single image if requested
                     if save_metadata {
-                        let meta_dir = metadata_dir.clone().unwrap_or_else(|| out_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+                        let meta_dir = metadata_dir.clone().unwrap_or_else(|| {
+                            out_path.parent().unwrap_or(Path::new(".")).to_path_buf()
+                        });
                         let proj = PathBuf::from(&meta_dir).join("project.kedit.json");
-                        let sidecar = meta_dir.join(format!("{}.kedit.json", out_path.file_stem().unwrap_or_default().to_string_lossy()));
+                        let sidecar = meta_dir.join(format!(
+                            "{}.kedit.json",
+                            out_path.file_stem().unwrap_or_default().to_string_lossy()
+                        ));
                         metadata::save_project(&proj, &[sidecar], Some(target_lang.clone()))?;
                         println!("[Metadata] Project saved to {:?}", proj);
                     }
@@ -1085,11 +1398,22 @@ async fn main() -> Result<()> {
                             translated_files.push(target_path);
                         }
                         if save_metadata {
-                            let meta_dir = metadata_dir.clone().unwrap_or_else(|| temp_output_dir.clone());
+                            let meta_dir = metadata_dir
+                                .clone()
+                                .unwrap_or_else(|| temp_output_dir.clone());
                             std::fs::create_dir_all(&meta_dir)?;
-                            let sidecars: Vec<PathBuf> = translated_files.iter().map(|p| meta_dir.join(format!("{}.kedit.json", p.file_stem().unwrap_or_default().to_string_lossy()))).collect();
+                            let sidecars: Vec<PathBuf> = translated_files
+                                .iter()
+                                .map(|p| {
+                                    meta_dir.join(format!(
+                                        "{}.kedit.json",
+                                        p.file_stem().unwrap_or_default().to_string_lossy()
+                                    ))
+                                })
+                                .collect();
                             let proj = meta_dir.join("project.kedit.json");
-                            let _ = metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
+                            let _ =
+                                metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
                             println!("[Metadata] Project saved to {:?}", proj);
                         }
                         if export_as_cbz {
@@ -1185,19 +1509,34 @@ async fn main() -> Result<()> {
                                     &openai_model_c,
                                     &claude_key_c,
                                     &claude_model_c,
-                                ).expect("primary provider build failed");
+                                )
+                                .expect("primary provider build failed");
                                 let mut fallbacks = Vec::new();
                                 if let Some(fb) = fallback_str_c {
-                                    for fb_name in fb.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                                        if fb_name.eq_ignore_ascii_case(&provider_name) { continue; }
-                                        if let Ok(p) = build_provider(fb_name, &gemini_key_c, &gemini_model_c, &openai_key_c, &openai_base_c, &openai_model_c, &claude_key_c, &claude_model_c) {
+                                    for fb_name in
+                                        fb.split(',').map(|s| s.trim()).filter(|s| !s.is_empty())
+                                    {
+                                        if fb_name.eq_ignore_ascii_case(&provider_name) {
+                                            continue;
+                                        }
+                                        if let Ok(p) = build_provider(
+                                            fb_name,
+                                            &gemini_key_c,
+                                            &gemini_model_c,
+                                            &openai_key_c,
+                                            &openai_base_c,
+                                            &openai_model_c,
+                                            &claude_key_c,
+                                            &claude_model_c,
+                                        ) {
                                             fallbacks.push(p);
                                         }
                                     }
                                 }
                                 let chain = ProviderChain { primary, fallbacks };
                                 let limiter = RateLimiter::new(rate_limit_c);
-                                let mut yolo = YoloModel::new(model_file.as_path()).expect("yolo load failed");
+                                let mut yolo =
+                                    YoloModel::new(model_file.as_path()).expect("yolo load failed");
                                 let file_name = file_path.file_name().unwrap().to_owned();
                                 let target_path = out_dir.join(&file_name);
                                 // per-task cache (open fresh connection to avoid !Send)
@@ -1213,7 +1552,10 @@ async fn main() -> Result<()> {
                                     prompt_sig: &prompt_sig,
                                     target_lang: &target_lang,
                                     font_bytes: &font_bytes,
-                                    cjk_font_bytes: cjk_opt.as_ref().as_deref().map(|v| v as &[u8]),
+                                    cjk_font_bytes: cjk_opt
+                                        .as_ref()
+                                        .as_deref()
+                                        .map(|v| v as &[u8]),
                                     batch_size,
                                     cache: cache_local.as_ref(),
                                     save_metadata: save_meta_flag,
@@ -1224,12 +1566,19 @@ async fn main() -> Result<()> {
                                     mode: mode_c2,
                                     ocr_model: ocr_model_c2,
                                 };
-                                let res = translate_page(&file_path, &target_path, &mut yolo, &ctx).await;
+                                let res =
+                                    translate_page(&file_path, &target_path, &mut yolo, &ctx).await;
                                 let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
                                 match res {
-                                    Ok(_) => println!("[Page {}/{}] Done {:?} -> {:?}", done, total, file_name, target_path),
+                                    Ok(_) => println!(
+                                        "[Page {}/{}] Done {:?} -> {:?}",
+                                        done, total, file_name, target_path
+                                    ),
                                     Err(e) => {
-                                        eprintln!("[Page {}/{}] [!] Error {:?}: {}. Copying original.", done, total, file_name, e);
+                                        eprintln!(
+                                            "[Page {}/{}] [!] Error {:?}: {}. Copying original.",
+                                            done, total, file_name, e
+                                        );
                                         let _ = std::fs::copy(&file_path, &target_path);
                                     }
                                 }
@@ -1239,17 +1588,31 @@ async fn main() -> Result<()> {
 
                         let mut results: Vec<(PathBuf, usize)> = Vec::new();
                         while let Some(r) = join_set.join_next().await {
-                            if let Ok(v) = r { results.push(v); }
+                            if let Ok(v) = r {
+                                results.push(v);
+                            }
                         }
                         results.sort_by_key(|(_, idx)| *idx);
-                        let translated_files: Vec<PathBuf> = results.into_iter().map(|(p, _)| p).collect();
+                        let translated_files: Vec<PathBuf> =
+                            results.into_iter().map(|(p, _)| p).collect();
 
                         if save_meta_flag {
-                            let meta_dir = meta_dir_opt.clone().unwrap_or_else(|| temp_output_dir.clone());
+                            let meta_dir = meta_dir_opt
+                                .clone()
+                                .unwrap_or_else(|| temp_output_dir.clone());
                             std::fs::create_dir_all(&meta_dir)?;
-                            let sidecars: Vec<PathBuf> = translated_files.iter().map(|p| meta_dir.join(format!("{}.kedit.json", p.file_stem().unwrap_or_default().to_string_lossy()))).collect();
+                            let sidecars: Vec<PathBuf> = translated_files
+                                .iter()
+                                .map(|p| {
+                                    meta_dir.join(format!(
+                                        "{}.kedit.json",
+                                        p.file_stem().unwrap_or_default().to_string_lossy()
+                                    ))
+                                })
+                                .collect();
                             let proj = meta_dir.join("project.kedit.json");
-                            let _ = metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
+                            let _ =
+                                metadata::save_project(&proj, &sidecars, Some(target_lang.clone()));
                             println!("[Metadata] Project saved to {:?}", proj);
                         }
 
@@ -1296,125 +1659,348 @@ async fn main() -> Result<()> {
                     println!("{:?}: {} bubbles", p.file_name().unwrap(), dets.len());
                     pages.push(PageEditData::new(
                         p.file_name().unwrap().to_string_lossy().to_string(),
-                        w, h, "English".to_string(), "classic".to_string(),
-                        dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect()
+                        w,
+                        h,
+                        "English".to_string(),
+                        "classic".to_string(),
+                        dets.iter()
+                            .enumerate()
+                            .map(|(i, d)| metadata::Bubble {
+                                id: (i + 1).to_string(),
+                                bbox: [d.x1, d.y1, d.x2, d.y2],
+                                conf: d.conf,
+                                translated: String::new(),
+                                bg_color: None,
+                                style: None,
+                                edited: false,
+                                raw_text: None,
+                                mask_path: None,
+                            })
+                            .collect(),
                     ));
                 }
                 // Single page -> object, multi -> array for backwards compat
-                let v = if pages.len()==1 { serde_json::to_value(&pages[0]).unwrap() } else { serde_json::to_value(&pages).unwrap() };
+                let v = if pages.len() == 1 {
+                    serde_json::to_value(&pages[0]).unwrap()
+                } else {
+                    serde_json::to_value(&pages).unwrap()
+                };
                 std::fs::create_dir_all(json.parent().unwrap_or(Path::new(".")))?;
                 std::fs::write(&json, serde_json::to_string_pretty(&v).unwrap())?;
                 println!("Exported {} pages to {:?}", pages.len(), json);
             }
-            MetadataCmd::Render { image, metadata, project, images, output, font, cjk_font, jobs } => {
+            MetadataCmd::Render {
+                image,
+                metadata,
+                project,
+                images,
+                output,
+                font,
+                cjk_font,
+                jobs,
+                progress,
+                quiet,
+            } => {
+                let jsonl = progress == "jsonl";
+                // In quiet/jsonl mode all human logs go to stderr; stdout stays clean for machines.
+                macro_rules! info {
+                    ($($t:tt)*) => {
+                        if jsonl || quiet { eprintln!($($t)*) } else { println!($($t)*) }
+                    }
+                }
                 if let Some(proj_path) = project {
                     // Batch render via project.kedit.json
-                    let proj = metadata::load_project(&proj_path).with_context(|| format!("Failed to load project {:?}", proj_path))?;
+                    let proj = metadata::load_project(&proj_path)
+                        .with_context(|| format!("Failed to load project {:?}", proj_path))?;
                     let jobs_num = parse_jobs(&jobs);
                     let proj_dir = proj_path.parent().unwrap_or(Path::new(".")).to_path_buf();
                     let images_dir = images.clone();
                     std::fs::create_dir_all(&output)?;
-                    println!("[Batch Render] {} pages jobs={} -> {:?}", proj.pages.len(), jobs_num, output);
-                    let font_bytes_global = if font.exists() { std::fs::read(font)? } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") { std::fs::read(p)? } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() };
-                    let cjk_bytes_global = if cjk_font.exists() { std::fs::read(&cjk_font).ok() } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") { std::fs::read(p).ok() } else { None };
+                    info!(
+                        "[Batch Render] {} pages jobs={} -> {:?}",
+                        proj.pages.len(),
+                        jobs_num,
+                        output
+                    );
+                    let font_bytes_global = if font.exists() {
+                        std::fs::read(font)?
+                    } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
+                        std::fs::read(p)?
+                    } else {
+                        include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                    };
+                    let cjk_bytes_global = if cjk_font.exists() {
+                        std::fs::read(&cjk_font).ok()
+                    } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
+                        std::fs::read(p).ok()
+                    } else {
+                        None
+                    };
+                    let session =
+                        kzktdk::editor::EditorSession::new(font_bytes_global, cjk_bytes_global)?;
                     for (idx, page_meta_str) in proj.pages.iter().enumerate() {
+                        let t0 = std::time::Instant::now();
                         let meta_path = {
                             let p = PathBuf::from(page_meta_str);
-                            if p.exists() { p } else { proj_dir.join(Path::new(page_meta_str).file_name().unwrap_or_default()) }
+                            if p.exists() {
+                                p
+                            } else {
+                                proj_dir
+                                    .join(Path::new(page_meta_str).file_name().unwrap_or_default())
+                            }
                         };
-                        let data = metadata::load_page_metadata(&meta_path).with_context(|| format!("Failed to load {:?}", meta_path))?;
+                        let data = metadata::load_page_metadata(&meta_path)
+                            .with_context(|| format!("Failed to load {:?}", meta_path))?;
                         // Resolve image path: --images folder overrides, else derive from meta page name
                         let img_path = if let Some(ref img_dir) = images_dir {
                             let cand1 = img_dir.join(&data.page);
-                            if cand1.exists() { cand1 } else {
+                            if cand1.exists() {
+                                cand1
+                            } else {
                                 // try natural sort match by index
-                                let entries: Vec<PathBuf> = std::fs::read_dir(img_dir).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map(|e| e.eq_ignore_ascii_case("jpg")||e.eq_ignore_ascii_case("png")||e.eq_ignore_ascii_case("webp")).unwrap_or(false)).collect()).unwrap_or_default();
-                                if idx < entries.len() { entries[idx].clone() } else { cand1 }
+                                let entries: Vec<PathBuf> = std::fs::read_dir(img_dir)
+                                    .map(|rd| {
+                                        rd.filter_map(|e| e.ok())
+                                            .map(|e| e.path())
+                                            .filter(|p| {
+                                                p.extension()
+                                                    .map(|e| {
+                                                        e.eq_ignore_ascii_case("jpg")
+                                                            || e.eq_ignore_ascii_case("png")
+                                                            || e.eq_ignore_ascii_case("webp")
+                                                    })
+                                                    .unwrap_or(false)
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                if idx < entries.len() {
+                                    entries[idx].clone()
+                                } else {
+                                    cand1
+                                }
                             }
                         } else {
                             // try sibling of meta file
                             let cand = meta_path.with_file_name(&data.page);
-                            if cand.exists() { cand } else { PathBuf::from(&data.page) }
+                            if cand.exists() {
+                                cand
+                            } else {
+                                PathBuf::from(&data.page)
+                            }
                         };
                         if !img_path.exists() {
-                            eprintln!("[{}/{}] Skip {}: image not found {:?}", idx+1, proj.pages.len(), data.page, img_path);
+                            eprintln!(
+                                "[{}/{}] Skip {}: image not found {:?}",
+                                idx + 1,
+                                proj.pages.len(),
+                                data.page,
+                                img_path
+                            );
                             continue;
                         }
-                        let img = image::open(&img_path).with_context(|| format!("Failed to open {:?}", img_path))?;
-                        let mut rgb = img.to_rgb8();
-                        let dets: Vec<kzktdk::model::yolo::Detection> = data.bubbles.iter().filter(|b| b.translated.to_uppercase() != "SKIP" && !b.translated.trim().is_empty()).map(|b| kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf }).collect();
-                        if !dets.is_empty() { inpaint_image(&mut rgb, &dets)?; }
-                        let global_typesetter = Typesetter::new(&font_bytes_global, cjk_bytes_global.as_deref())?;
-                        for b in &data.bubbles {
-                            if b.translated.to_uppercase() == "SKIP" || b.translated.trim().is_empty() { continue; }
-                            let det = kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf };
-                            if let Some(style) = &b.style {
-                                if let Some(ref fname) = style.font_family {
-                                    let mut custom_bytes: Option<Vec<u8>> = None;
-                                    if kzktdk::font::FontRegistry::resolve(fname).is_ok() {
-                                        let list = kzktdk::font::FontRegistry::list();
-                                        if let Some(info) = list.iter().find(|f| &f.name == fname) { custom_bytes = std::fs::read(&info.path).ok(); }
-                                    } else if Path::new(fname).exists() { custom_bytes = std::fs::read(fname).ok(); }
-                                    if let Some(bytes) = custom_bytes {
-                                        if let Ok(ts) = Typesetter::new(&bytes, cjk_bytes_global.as_deref()) {
-                                            ts.render_bubble_text_with_style(&mut rgb, &det, &b.translated, Some(&data.target_lang), None, Some(style));
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-                            global_typesetter.render_bubble_text_with_style(&mut rgb, &det, &b.translated, Some(&data.target_lang), None, b.style.as_ref());
-                        }
-                        let out_path = output.join(Path::new(&data.page).file_name().unwrap_or_else(|| std::ffi::OsStr::new(&data.page)));
+                        let img = image::open(&img_path)
+                            .with_context(|| format!("Failed to open {:?}", img_path))?;
+                        let rgb = session.render_page(&img.to_rgb8(), &data)?;
+                        let out_path = output.join(
+                            Path::new(&data.page)
+                                .file_name()
+                                .unwrap_or_else(|| std::ffi::OsStr::new(&data.page)),
+                        );
                         rgb.save(&out_path)?;
-                        println!("[{}/{}] Rendered {:?} -> {:?}", idx+1, proj.pages.len(), img_path.file_name().unwrap(), out_path);
+                        if jsonl {
+                            eprintln!(
+                                "{}",
+                                serde_json::json!({"idx": idx+1, "total": proj.pages.len(), "page": data.page, "out": out_path.to_string_lossy(), "ok": true, "ms": t0.elapsed().as_millis() as u64})
+                            );
+                        } else {
+                            info!(
+                                "[{}/{}] Rendered {:?} -> {:?}",
+                                idx + 1,
+                                proj.pages.len(),
+                                img_path.file_name().unwrap(),
+                                out_path
+                            );
+                        }
                     }
-                    println!("Batch render complete -> {:?}", output);
+                    if jsonl {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"done": true, "ok_count": proj.pages.len(), "fail_count": 0})
+                        );
+                    } else {
+                        info!("Batch render complete -> {:?}", output);
+                    }
                 } else {
                     // Single render
-                    let img_path = image.clone().context("Missing <IMAGE> or --project for render")?;
-                    let meta_path = metadata.clone().context("Missing --metadata for single render")?;
+                    let t0 = std::time::Instant::now();
+                    let img_path = image
+                        .clone()
+                        .context("Missing <IMAGE> or --project for render")?;
+                    let meta_path = metadata
+                        .clone()
+                        .context("Missing --metadata for single render")?;
                     let data = metadata::load_page_metadata(&meta_path)?;
-                    let img = image::open(&img_path).with_context(|| format!("Failed to open {:?}", img_path))?;
-                    let mut rgb = img.to_rgb8();
-                    let dets: Vec<kzktdk::model::yolo::Detection> = data.bubbles.iter().filter(|b| b.translated.to_uppercase() != "SKIP" && !b.translated.trim().is_empty()).map(|b| kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf }).collect();
-                    if !dets.is_empty() { inpaint_image(&mut rgb, &dets)?; }
-                    let font_bytes = if font.exists() { std::fs::read(&font)? } else {
+                    let img = image::open(&img_path)
+                        .with_context(|| format!("Failed to open {:?}", img_path))?;
+                    let font_bytes_single = if font.exists() {
+                        std::fs::read(&font)?
+                    } else {
                         let fstr = font.to_string_lossy().to_string();
                         if !fstr.is_empty() && kzktdk::font::FontRegistry::resolve(&fstr).is_ok() {
                             let list = kzktdk::font::FontRegistry::list();
-                            if let Some(info) = list.iter().find(|f| f.name == fstr) { std::fs::read(&info.path).unwrap_or_else(|_| include_bytes!("../fonts/Komika Axis.ttf").to_vec()) } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
-                        } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") { std::fs::read(p)? } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() }
-                    };
-                    let cjk_bytes = if cjk_font.exists() { std::fs::read(&cjk_font).ok() } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") { std::fs::read(p).ok() } else { None };
-                    let global_typesetter = Typesetter::new(&font_bytes, cjk_bytes.as_deref())?;
-                    for b in &data.bubbles {
-                        if b.translated.to_uppercase() == "SKIP" || b.translated.trim().is_empty() { continue; }
-                        let det = kzktdk::model::yolo::Detection { x1: b.bbox[0], y1: b.bbox[1], x2: b.bbox[2], y2: b.bbox[3], conf: b.conf };
-                        if let Some(style) = &b.style {
-                            if let Some(ref fname) = style.font_family {
-                                let mut custom_bytes: Option<Vec<u8>> = None;
-                                if kzktdk::font::FontRegistry::resolve(fname).is_ok() {
-                                    let list = kzktdk::font::FontRegistry::list();
-                                    if let Some(info) = list.iter().find(|f| &f.name == fname) { custom_bytes = std::fs::read(&info.path).ok(); }
-                                } else if Path::new(fname).exists() { custom_bytes = std::fs::read(fname).ok(); }
-                                if let Some(bytes) = custom_bytes {
-                                    if let Ok(ts) = Typesetter::new(&bytes, cjk_bytes.as_deref()) {
-                                        ts.render_bubble_text_with_style(&mut rgb, &det, &b.translated, Some(&data.target_lang), None, Some(style));
-                                        continue;
-                                    }
-                                }
+                            if let Some(info) = list.iter().find(|f| f.name == fstr) {
+                                std::fs::read(&info.path).unwrap_or_else(|_| {
+                                    include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                                })
+                            } else {
+                                include_bytes!("../fonts/Komika Axis.ttf").to_vec()
                             }
+                        } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
+                            std::fs::read(p)?
+                        } else {
+                            include_bytes!("../fonts/Komika Axis.ttf").to_vec()
                         }
-                        global_typesetter.render_bubble_text_with_style(&mut rgb, &det, &b.translated, Some(&data.target_lang), None, b.style.as_ref());
+                    };
+                    let cjk_bytes_single = if cjk_font.exists() {
+                        std::fs::read(&cjk_font).ok()
+                    } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
+                        std::fs::read(p).ok()
+                    } else {
+                        None
+                    };
+                    let session_single =
+                        kzktdk::editor::EditorSession::new(font_bytes_single, cjk_bytes_single)?;
+                    let rgb = session_single.render_page(&img.to_rgb8(), &data)?;
+                    if let Some(parent) = output.parent() {
+                        std::fs::create_dir_all(parent)?;
                     }
-                    if let Some(parent) = output.parent() { std::fs::create_dir_all(parent)?; }
                     rgb.save(&output)?;
-                    println!("Rendered {:?} -> {:?}", img_path, output);
+                    if jsonl {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"idx": 1, "total": 1, "page": data.page, "out": output.to_string_lossy(), "ok": true, "ms": t0.elapsed().as_millis() as u64})
+                        );
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"done": true, "ok_count": 1, "fail_count": 0})
+                        );
+                    } else {
+                        info!("Rendered {:?} -> {:?}", img_path, output);
+                    }
                 }
             }
-            MetadataCmd::Edit { json, set, bbox, add, delete, font_family, font_size, text_color, stroke_color, align, edited, bg_color, conf, clear_style, raw_text, replace, apply_style, bold, italic } => {
+            MetadataCmd::Edit {
+                json,
+                set,
+                bbox,
+                add,
+                delete,
+                font_family,
+                font_size,
+                text_color,
+                stroke_color,
+                align,
+                edited,
+                bg_color,
+                conf,
+                clear_style,
+                raw_text,
+                replace,
+                apply_style,
+                bold,
+                italic,
+                stdin_patch,
+                order,
+                mask_path,
+            } => {
+                if stdin_patch {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .context("Failed to read stdin patch")?;
+                    let patch: kzktdk::editor::EditPatch = serde_json::from_str(&buf)
+                        .with_context(|| "Failed to parse stdin EditPatch JSON")?;
+                    let mut data = metadata::load_page_metadata(&json)?;
+                    let mut trial = data.clone();
+                    let (logs, errors) = kzktdk::editor::apply_patch(&mut trial, &patch);
+                    if !errors.is_empty() {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"ok": false, "errors": errors, "logs": logs})
+                                .to_string()
+                        );
+                        std::process::exit(2);
+                    }
+                    data = trial;
+                    metadata::save_page_metadata(&json, &data)?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok": true, "logs": logs}).to_string()
+                    );
+                    return Ok(());
+                }
                 let mut data = metadata::load_page_metadata(&json)?;
+                // Delegate legacy flags through the shared facade patch (lenient: apply valid, warn on errors).
+                let facade_patch = kzktdk::editor::EditPatch {
+                    set: set.clone(),
+                    bbox: bbox.clone(),
+                    add: add.clone(),
+                    delete: delete.clone(),
+                    font_family: font_family.clone(),
+                    font_size: font_size.clone(),
+                    text_color: text_color.clone(),
+                    stroke_color: stroke_color.clone(),
+                    align: align.clone(),
+                    edited: edited.clone(),
+                    bg_color: bg_color.clone(),
+                    conf: conf.clone(),
+                    clear_style: clear_style.clone(),
+                    raw_text: raw_text.clone(),
+                    replace: replace.clone(),
+                    apply_style: apply_style.clone(),
+                    bold: bold.clone(),
+                    italic: italic.clone(),
+                    order: order.clone(),
+                    mask_path: mask_path.clone(),
+                    ..Default::default()
+                };
+                // Fast path: if only facade-covered ops are used, apply once via facade.
+                // Otherwise fall through to legacy verbose handling below for identical messages.
+                let legacy_only = false;
+                if !legacy_only
+                    && set.is_empty()
+                    && bbox.is_empty()
+                    && add.is_empty()
+                    && delete.is_empty()
+                    && font_family.is_empty()
+                    && font_size.is_empty()
+                    && text_color.is_empty()
+                    && stroke_color.is_empty()
+                    && align.is_empty()
+                    && edited.is_empty()
+                    && bg_color.is_empty()
+                    && conf.is_empty()
+                    && clear_style.is_empty()
+                    && raw_text.is_empty()
+                    && replace.is_empty()
+                    && apply_style.is_none()
+                    && bold.is_empty()
+                    && italic.is_empty()
+                    && (order.is_some() || !mask_path.is_empty())
+                {
+                    let (logs, errors) = kzktdk::editor::apply_patch(&mut data, &facade_patch);
+                    for l in &logs {
+                        println!("{}", l);
+                    }
+                    for e in &errors {
+                        eprintln!("{}", e);
+                    }
+                    metadata::save_page_metadata(&json, &data)?;
+                    println!("Saved edited metadata to {:?}", json);
+                    return Ok(());
+                }
                 for s in set {
                     if let Some((id, txt)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
@@ -1428,14 +2014,20 @@ async fn main() -> Result<()> {
                 }
                 for s in bbox {
                     if let Some((id, coords)) = s.split_once('=') {
-                        let parts: Vec<u32> = coords.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                        let parts: Vec<u32> = coords
+                            .split(',')
+                            .filter_map(|v| v.trim().parse().ok())
+                            .collect();
                         if parts.len() == 4 {
                             if parts[0] >= parts[2] || parts[1] >= parts[3] {
                                 eprintln!("Invalid bbox for {}: x1<x2 and y1<y2 required", id);
                                 continue;
                             }
                             if parts[2] > data.width || parts[3] > data.height {
-                                eprintln!("Invalid bbox for {}: x2<=width({}) y2<=height({}) required, got {:?}", id, data.width, data.height, parts);
+                                eprintln!(
+                                    "Invalid bbox for {}: x2<=width({}) y2<=height({}) required, got {:?}",
+                                    id, data.width, data.height, parts
+                                );
                                 continue;
                             }
                             if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
@@ -1454,13 +2046,22 @@ async fn main() -> Result<()> {
                         let (bbox_str, txt) = if let Some(eq_pos) = rest.find('=') {
                             let candidate_bbox = &rest[..eq_pos];
                             let comma_cnt = candidate_bbox.matches(',').count();
-                            if comma_cnt == 3 { (&rest[..eq_pos], &rest[eq_pos+1..]) } else { (rest, "") }
-                        } else { (rest, "") };
+                            if comma_cnt == 3 {
+                                (&rest[..eq_pos], &rest[eq_pos + 1..])
+                            } else {
+                                (rest, "")
+                            }
+                        } else {
+                            (rest, "")
+                        };
                         if data.bubbles.iter().any(|b| b.id == id) {
                             eprintln!("Bubble {} already exists, skip add", id);
                             continue;
                         }
-                        let parts: Vec<u32> = bbox_str.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                        let parts: Vec<u32> = bbox_str
+                            .split(',')
+                            .filter_map(|v| v.trim().parse().ok())
+                            .collect();
                         if parts.len() != 4 {
                             eprintln!("Invalid bbox for add {}: expected x1,y1,x2,y2", id);
                             continue;
@@ -1470,84 +2071,230 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         if parts[2] > data.width || parts[3] > data.height {
-                            eprintln!("Invalid bbox for add {}: out of bounds {}x{}", id, data.width, data.height);
+                            eprintln!(
+                                "Invalid bbox for add {}: out of bounds {}x{}",
+                                id, data.width, data.height
+                            );
                             continue;
                         }
-                        data.bubbles.push(metadata::Bubble { id: id.to_string(), bbox: [parts[0],parts[1],parts[2],parts[3]], conf: 1.0, translated: txt.to_string(), bg_color: None, style: None, edited: false, raw_text: None });
-                        println!("Added bubble {} bbox {:?} text \"{}\"", id, [parts[0],parts[1],parts[2],parts[3]], txt);
+                        data.bubbles.push(metadata::Bubble {
+                            id: id.to_string(),
+                            bbox: [parts[0], parts[1], parts[2], parts[3]],
+                            conf: 1.0,
+                            translated: txt.to_string(),
+                            bg_color: None,
+                            style: None,
+                            edited: false,
+                            raw_text: None,
+                            mask_path: None,
+                        });
+                        println!(
+                            "Added bubble {} bbox {:?} text \"{}\"",
+                            id,
+                            [parts[0], parts[1], parts[2], parts[3]],
+                            txt
+                        );
                     } else {
-                        eprintln!("Invalid --add format: expected ID=x1,y1,x2,y2[=text] got '{}'", s);
+                        eprintln!(
+                            "Invalid --add format: expected ID=x1,y1,x2,y2[=text] got '{}'",
+                            s
+                        );
                     }
                 }
                 for id in delete {
                     let before = data.bubbles.len();
                     data.bubbles.retain(|b| b.id != id);
-                    if data.bubbles.len() < before { println!("Deleted bubble {}", id); } else { eprintln!("Bubble {} not found for delete", id); }
+                    if data.bubbles.len() < before {
+                        println!("Deleted bubble {}", id);
+                    } else {
+                        eprintln!("Bubble {} not found for delete", id);
+                    }
                 }
                 for s in font_family {
                     if let Some((id, font)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if font.is_empty() { if let Some(style) = b.style.as_mut() { style.font_family = None; } println!("Cleared font for {}", id); } else { let style = b.style.get_or_insert_with(metadata::BubbleStyle::default); style.font_family = Some(font.to_string()); println!("Set font {} = {}", id, font); }
-                        } else { eprintln!("Bubble {} not found for font_family", id); }
+                            if font.is_empty() {
+                                if let Some(style) = b.style.as_mut() {
+                                    style.font_family = None;
+                                }
+                                println!("Cleared font for {}", id);
+                            } else {
+                                let style =
+                                    b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                style.font_family = Some(font.to_string());
+                                println!("Set font {} = {}", id, font);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found for font_family", id);
+                        }
                     }
                 }
                 for s in font_size {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if val.is_empty() { if let Some(style) = b.style.as_mut() { style.font_size = None; } println!("Cleared font_size for {}", id); } else if let Ok(f) = val.parse::<f32>() { let style = b.style.get_or_insert_with(metadata::BubbleStyle::default); style.font_size = Some(f); println!("Set font_size {} = {}", id, f); } else { eprintln!("Invalid font_size for {}: {}", id, val); }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() {
+                                    style.font_size = None;
+                                }
+                                println!("Cleared font_size for {}", id);
+                            } else if let Ok(f) = val.parse::<f32>() {
+                                let style =
+                                    b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                style.font_size = Some(f);
+                                println!("Set font_size {} = {}", id, f);
+                            } else {
+                                eprintln!("Invalid font_size for {}: {}", id, val);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for s in text_color {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if val.is_empty() { if let Some(style) = b.style.as_mut() { style.text_color = None; } println!("Cleared text_color for {}", id); } else { let parts: Vec<u8> = val.split(',').filter_map(|v| v.trim().parse().ok()).collect(); if parts.len()==3 { let style = b.style.get_or_insert_with(metadata::BubbleStyle::default); style.text_color = Some([parts[0],parts[1],parts[2]]); println!("Set text_color {} = {:?}", id, style.text_color); } else { eprintln!("Invalid text_color for {}: expected R,G,B", id); } }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() {
+                                    style.text_color = None;
+                                }
+                                println!("Cleared text_color for {}", id);
+                            } else {
+                                let parts: Vec<u8> = val
+                                    .split(',')
+                                    .filter_map(|v| v.trim().parse().ok())
+                                    .collect();
+                                if parts.len() == 3 {
+                                    let style =
+                                        b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                    style.text_color = Some([parts[0], parts[1], parts[2]]);
+                                    println!("Set text_color {} = {:?}", id, style.text_color);
+                                } else {
+                                    eprintln!("Invalid text_color for {}: expected R,G,B", id);
+                                }
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for s in stroke_color {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if val.is_empty() { if let Some(style) = b.style.as_mut() { style.stroke_color = None; } println!("Cleared stroke_color for {}", id); } else { let parts: Vec<u8> = val.split(',').filter_map(|v| v.trim().parse().ok()).collect(); if parts.len()==3 { let style = b.style.get_or_insert_with(metadata::BubbleStyle::default); style.stroke_color = Some([parts[0],parts[1],parts[2]]); println!("Set stroke_color {} = {:?}", id, style.stroke_color); } else { eprintln!("Invalid stroke_color for {}: expected R,G,B", id); } }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() {
+                                    style.stroke_color = None;
+                                }
+                                println!("Cleared stroke_color for {}", id);
+                            } else {
+                                let parts: Vec<u8> = val
+                                    .split(',')
+                                    .filter_map(|v| v.trim().parse().ok())
+                                    .collect();
+                                if parts.len() == 3 {
+                                    let style =
+                                        b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                    style.stroke_color = Some([parts[0], parts[1], parts[2]]);
+                                    println!("Set stroke_color {} = {:?}", id, style.stroke_color);
+                                } else {
+                                    eprintln!("Invalid stroke_color for {}: expected R,G,B", id);
+                                }
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for s in align {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if val.is_empty() { if let Some(style) = b.style.as_mut() { style.align = None; } println!("Cleared align for {}", id); } else { let style = b.style.get_or_insert_with(metadata::BubbleStyle::default); style.align = Some(val.to_string()); println!("Set align {} = {}", id, val); }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() {
+                                    style.align = None;
+                                }
+                                println!("Cleared align for {}", id);
+                            } else {
+                                let style =
+                                    b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                style.align = Some(val.to_string());
+                                println!("Set align {} = {}", id, val);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for s in edited {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if let Ok(v) = val.parse::<bool>() { b.edited = v; println!("Set edited {} = {}", id, v); } else { eprintln!("Invalid edited for {}: expected true/false", id); }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if let Ok(v) = val.parse::<bool>() {
+                                b.edited = v;
+                                println!("Set edited {} = {}", id, v);
+                            } else {
+                                eprintln!("Invalid edited for {}: expected true/false", id);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for s in bg_color {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if val.is_empty() { b.bg_color = None; println!("Cleared bg_color for {}", id); } else { let parts: Vec<u8> = val.split(',').filter_map(|v| v.trim().parse().ok()).collect(); if parts.len()==3 { b.bg_color = Some([parts[0],parts[1],parts[2]]); println!("Set bg_color {} = {:?}", id, b.bg_color); } else { eprintln!("Invalid bg_color for {}: expected R,G,B", id); } }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if val.is_empty() {
+                                b.bg_color = None;
+                                println!("Cleared bg_color for {}", id);
+                            } else {
+                                let parts: Vec<u8> = val
+                                    .split(',')
+                                    .filter_map(|v| v.trim().parse().ok())
+                                    .collect();
+                                if parts.len() == 3 {
+                                    b.bg_color = Some([parts[0], parts[1], parts[2]]);
+                                    println!("Set bg_color {} = {:?}", id, b.bg_color);
+                                } else {
+                                    eprintln!("Invalid bg_color for {}: expected R,G,B", id);
+                                }
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for s in conf {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if let Ok(v) = val.parse::<f32>() { b.conf = v.clamp(0.0, 1.0); println!("Set conf {} = {}", id, b.conf); } else { eprintln!("Invalid conf for {}: {}", id, val); }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if let Ok(v) = val.parse::<f32>() {
+                                b.conf = v.clamp(0.0, 1.0);
+                                println!("Set conf {} = {}", id, b.conf);
+                            } else {
+                                eprintln!("Invalid conf for {}: {}", id, val);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for id in clear_style {
-                    if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) { b.style = None; println!("Cleared style for {}", id); } else { eprintln!("Bubble {} not found for clear_style", id); }
+                    if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
+                        b.style = None;
+                        println!("Cleared style for {}", id);
+                    } else {
+                        eprintln!("Bubble {} not found for clear_style", id);
+                    }
                 }
                 for s in raw_text {
                     if let Some((id, txt)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if txt.is_empty() { b.raw_text = None; println!("Cleared raw_text for {}", id); } else { b.raw_text = Some(txt.to_string()); println!("Set raw_text {} = \"{}\"", id, txt); }
-                        } else { eprintln!("Bubble {} not found for raw_text", id); }
+                            if txt.is_empty() {
+                                b.raw_text = None;
+                                println!("Cleared raw_text for {}", id);
+                            } else {
+                                b.raw_text = Some(txt.to_string());
+                                println!("Set raw_text {} = \"{}\"", id, txt);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found for raw_text", id);
+                        }
                     }
                 }
                 for rep in replace {
@@ -1561,23 +2308,80 @@ async fn main() -> Result<()> {
                             }
                         }
                         println!("Replace \"{}\" -> \"{}\" in {} bubbles", old, new, cnt);
-                    } else { eprintln!("Invalid --replace format: expected Old=New got '{}'", rep); }
+                    } else {
+                        eprintln!("Invalid --replace format: expected Old=New got '{}'", rep);
+                    }
                 }
                 if let Some(spec) = apply_style {
                     // Spec: comma-separated key=value e.g. align=center,bold=true,font_size=20
-                    let pairs: Vec<(&str,&str)> = spec.split(',').filter_map(|p| p.split_once('=')).collect();
+                    let pairs: Vec<(&str, &str)> =
+                        spec.split(',').filter_map(|p| p.split_once('=')).collect();
                     let mut cnt = 0;
                     for b in data.bubbles.iter_mut() {
                         let style = b.style.get_or_insert_with(metadata::BubbleStyle::default);
-                        for (k,v) in &pairs {
+                        for (k, v) in &pairs {
                             match k.trim().to_lowercase().as_str() {
-                                "align" => { if v.is_empty() { style.align=None } else { style.align=Some(v.to_string()) } }
-                                "font_size" | "fontsize" | "size" => { if v.is_empty() { style.font_size=None } else if let Ok(f)=v.parse::<f32>() { style.font_size=Some(f) } }
-                                "font_family" | "font" => { if v.is_empty() { style.font_family=None } else { style.font_family=Some(v.to_string()) } }
-                                "text_color" | "tc" => { if v.is_empty() { style.text_color=None } else { let p: Vec<u8>=v.split(',').filter_map(|x| x.trim().parse().ok()).collect(); if p.len()==3 { style.text_color=Some([p[0],p[1],p[2]]) } } }
-                                "stroke_color" | "sc" => { if v.is_empty() { style.stroke_color=None } else { let p: Vec<u8>=v.split(',').filter_map(|x| x.trim().parse().ok()).collect(); if p.len()==3 { style.stroke_color=Some([p[0],p[1],p[2]]) } } }
-                                "bold" | "is_bold" => { if v.is_empty() { style.is_bold=None } else if let Ok(bv)=v.parse::<bool>() { style.is_bold=Some(bv) } }
-                                "italic" | "is_italic" => { if v.is_empty() { style.is_italic=None } else if let Ok(bv)=v.parse::<bool>() { style.is_italic=Some(bv) } }
+                                "align" => {
+                                    if v.is_empty() {
+                                        style.align = None
+                                    } else {
+                                        style.align = Some(v.to_string())
+                                    }
+                                }
+                                "font_size" | "fontsize" | "size" => {
+                                    if v.is_empty() {
+                                        style.font_size = None
+                                    } else if let Ok(f) = v.parse::<f32>() {
+                                        style.font_size = Some(f)
+                                    }
+                                }
+                                "font_family" | "font" => {
+                                    if v.is_empty() {
+                                        style.font_family = None
+                                    } else {
+                                        style.font_family = Some(v.to_string())
+                                    }
+                                }
+                                "text_color" | "tc" => {
+                                    if v.is_empty() {
+                                        style.text_color = None
+                                    } else {
+                                        let p: Vec<u8> = v
+                                            .split(',')
+                                            .filter_map(|x| x.trim().parse().ok())
+                                            .collect();
+                                        if p.len() == 3 {
+                                            style.text_color = Some([p[0], p[1], p[2]])
+                                        }
+                                    }
+                                }
+                                "stroke_color" | "sc" => {
+                                    if v.is_empty() {
+                                        style.stroke_color = None
+                                    } else {
+                                        let p: Vec<u8> = v
+                                            .split(',')
+                                            .filter_map(|x| x.trim().parse().ok())
+                                            .collect();
+                                        if p.len() == 3 {
+                                            style.stroke_color = Some([p[0], p[1], p[2]])
+                                        }
+                                    }
+                                }
+                                "bold" | "is_bold" => {
+                                    if v.is_empty() {
+                                        style.is_bold = None
+                                    } else if let Ok(bv) = v.parse::<bool>() {
+                                        style.is_bold = Some(bv)
+                                    }
+                                }
+                                "italic" | "is_italic" => {
+                                    if v.is_empty() {
+                                        style.is_italic = None
+                                    } else if let Ok(bv) = v.parse::<bool>() {
+                                        style.is_italic = Some(bv)
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -1588,150 +2392,642 @@ async fn main() -> Result<()> {
                 for s in bold {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if val.is_empty() { if let Some(style)=b.style.as_mut() { style.is_bold=None } println!("Cleared bold for {}", id); } else if let Ok(v)=val.parse::<bool>() { let style=b.style.get_or_insert_with(metadata::BubbleStyle::default); style.is_bold=Some(v); println!("Set bold {} = {}", id, v); } else { eprintln!("Invalid bold for {}: {}", id, val); }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() {
+                                    style.is_bold = None
+                                }
+                                println!("Cleared bold for {}", id);
+                            } else if let Ok(v) = val.parse::<bool>() {
+                                let style =
+                                    b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                style.is_bold = Some(v);
+                                println!("Set bold {} = {}", id, v);
+                            } else {
+                                eprintln!("Invalid bold for {}: {}", id, val);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
                     }
                 }
                 for s in italic {
                     if let Some((id, val)) = s.split_once('=') {
                         if let Some(b) = data.bubbles.iter_mut().find(|b| b.id == id) {
-                            if val.is_empty() { if let Some(style)=b.style.as_mut() { style.is_italic=None } println!("Cleared italic for {}", id); } else if let Ok(v)=val.parse::<bool>() { let style=b.style.get_or_insert_with(metadata::BubbleStyle::default); style.is_italic=Some(v); println!("Set italic {} = {}", id, v); } else { eprintln!("Invalid italic for {}: {}", id, val); }
-                        } else { eprintln!("Bubble {} not found", id); }
+                            if val.is_empty() {
+                                if let Some(style) = b.style.as_mut() {
+                                    style.is_italic = None
+                                }
+                                println!("Cleared italic for {}", id);
+                            } else if let Ok(v) = val.parse::<bool>() {
+                                let style =
+                                    b.style.get_or_insert_with(metadata::BubbleStyle::default);
+                                style.is_italic = Some(v);
+                                println!("Set italic {} = {}", id, v);
+                            } else {
+                                eprintln!("Invalid italic for {}: {}", id, val);
+                            }
+                        } else {
+                            eprintln!("Bubble {} not found", id);
+                        }
+                    }
+                }
+                // P2: reading order + mask override (shared facade logic for messages).
+                if order.is_some() || !mask_path.is_empty() {
+                    let extra = kzktdk::editor::EditPatch {
+                        order: order.clone(),
+                        mask_path: mask_path.clone(),
+                        ..Default::default()
+                    };
+                    let (logs, errors) = kzktdk::editor::apply_patch(&mut data, &extra);
+                    for l in &logs {
+                        println!("{}", l);
+                    }
+                    for e in &errors {
+                        eprintln!("{}", e);
                     }
                 }
                 metadata::save_page_metadata(&json, &data)?;
                 println!("Saved edited metadata to {:?}", json);
             }
-            MetadataCmd::Validate { json } => {
-                let content = std::fs::read_to_string(&json).with_context(|| format!("Failed to read {:?}", json))?;
+            MetadataCmd::Validate {
+                json,
+                format,
+                quiet,
+            } => {
+                let as_json = format == "json";
+                let content = std::fs::read_to_string(&json)
+                    .with_context(|| format!("Failed to read {:?}", json))?;
                 // Try project first
                 if let Ok(proj) = serde_json::from_str::<metadata::Project>(&content) {
                     if proj.version == 1 && !proj.pages.is_empty() {
-                        println!("Valid Project v{}: {} pages", proj.version, proj.pages.len());
-                        for (i, p) in proj.pages.iter().enumerate() { println!("  [{:02}] {}", i+1, p); }
+                        if as_json {
+                            let report = metadata::ValidationReport {
+                                valid: true,
+                                kind: "project".to_string(),
+                                errors: vec![],
+                                meta: serde_json::json!({"version": proj.version, "pages": proj.pages.len(), "target_lang": proj.target_lang}),
+                            };
+                            println!("{}", serde_json::to_string(&report).unwrap());
+                        } else if quiet {
+                            eprintln!(
+                                "Valid Project v{}: {} pages",
+                                proj.version,
+                                proj.pages.len()
+                            );
+                        } else {
+                            println!(
+                                "Valid Project v{}: {} pages",
+                                proj.version,
+                                proj.pages.len()
+                            );
+                            for (i, p) in proj.pages.iter().enumerate() {
+                                println!("  [{:02}] {}", i + 1, p);
+                            }
+                        }
                         return Ok(());
                     }
                 }
-                let data: metadata::PageEditData = serde_json::from_str(&content).with_context(|| format!("Failed to parse PageEditData {:?}", json))?;
-                println!("Valid PageEditData v{}: {} bubbles, page={} ({}x{}) target_lang={} prompt_sig={}", data.version, data.bubbles.len(), data.page, data.width, data.height, data.target_lang, data.prompt_sig);
-                let mut seen = std::collections::HashSet::new();
-                for b in &data.bubbles {
-                    if !seen.insert(&b.id) { eprintln!("  [!] Duplicate id {}", b.id); }
-                    if b.bbox[0]>=b.bbox[2] || b.bbox[1]>=b.bbox[3] { eprintln!("  [!] Bubble {} invalid bbox {:?}", b.id, b.bbox); }
-                    if b.bbox[2] > data.width || b.bbox[3] > data.height { eprintln!("  [!] Bubble {} bbox out of bounds {:?} vs {}x{}", b.id, b.bbox, data.width, data.height); }
+                let data: metadata::PageEditData = serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse PageEditData {:?}", json))?;
+                let issues = metadata::validate_page(&data);
+                if as_json {
+                    let report = metadata::ValidationReport {
+                        valid: issues.is_empty(),
+                        kind: "page".to_string(),
+                        errors: issues.clone(),
+                        meta: serde_json::json!({"version": data.version, "page": data.page, "width": data.width, "height": data.height, "target_lang": data.target_lang, "prompt_sig": data.prompt_sig, "bubbles": data.bubbles.len()}),
+                    };
+                    println!("{}", serde_json::to_string(&report).unwrap());
+                    if !issues.is_empty() {
+                        std::process::exit(2);
+                    }
+                    return Ok(());
+                }
+                if quiet {
+                    eprintln!(
+                        "Valid PageEditData v{}: {} bubbles, page={} ({}x{}) target_lang={} prompt_sig={}",
+                        data.version,
+                        data.bubbles.len(),
+                        data.page,
+                        data.width,
+                        data.height,
+                        data.target_lang,
+                        data.prompt_sig
+                    );
+                } else {
+                    println!(
+                        "Valid PageEditData v{}: {} bubbles, page={} ({}x{}) target_lang={} prompt_sig={}",
+                        data.version,
+                        data.bubbles.len(),
+                        data.page,
+                        data.width,
+                        data.height,
+                        data.target_lang,
+                        data.prompt_sig
+                    );
+                }
+                for e in &issues {
+                    eprintln!(
+                        "  [!] {} {}: {}",
+                        e.code,
+                        e.id.as_deref().unwrap_or("-"),
+                        e.msg
+                    );
                 }
             }
-            MetadataCmd::Preview { image, metadata, id, text, output, font, cjk_font, font_family, font_size, text_color, stroke_color, align, show_raw } => {
+            MetadataCmd::Preview {
+                image,
+                metadata,
+                id,
+                text,
+                output,
+                to_stdout,
+                thumb,
+                font,
+                cjk_font,
+                font_family,
+                font_size,
+                text_color,
+                stroke_color,
+                align,
+                show_raw,
+                quiet,
+            } => {
+                let out_path: Option<PathBuf> = output;
+                if !to_stdout && out_path.is_none() {
+                    bail!("Missing --output (required unless --to-stdout)");
+                }
                 let data = metadata::load_page_metadata(&metadata)?;
-                let bubble = data.bubbles.iter().find(|b| b.id == id).cloned().context(format!("Bubble {} not found", id))?;
-                let display_text = if show_raw { bubble.raw_text.clone().unwrap_or(text.clone()) } else { text.clone() };
-                let mut rgb = image::open(&image).with_context(|| format!("Failed to open {:?}", image))?.to_rgb8();
-                let det = kzktdk::model::yolo::Detection { x1: bubble.bbox[0], y1: bubble.bbox[1], x2: bubble.bbox[2], y2: bubble.bbox[3], conf: bubble.conf };
-                inpaint_image(&mut rgb, &[det.clone()])?;
-                let font_bytes = if font.exists() { std::fs::read(&font)? } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") { std::fs::read(p)? } else { include_bytes!("../fonts/Komika Axis.ttf").to_vec() };
-                let cjk_bytes = if cjk_font.exists() { std::fs::read(&cjk_font).ok() } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") { std::fs::read(p).ok() } else { None };
+                let bubble = data
+                    .bubbles
+                    .iter()
+                    .find(|b| b.id == id)
+                    .cloned()
+                    .context(format!("Bubble {} not found", id))?;
+                let display_text = if show_raw {
+                    bubble.raw_text.clone().unwrap_or(text.clone())
+                } else {
+                    text.clone()
+                };
+                let rgb_in = image::open(&image)
+                    .with_context(|| format!("Failed to open {:?}", image))?
+                    .to_rgb8();
+                let font_bytes = if font.exists() {
+                    std::fs::read(&font)?
+                } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
+                    std::fs::read(p)?
+                } else {
+                    include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                };
+                let cjk_bytes = if cjk_font.exists() {
+                    std::fs::read(&cjk_font).ok()
+                } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
+                    std::fs::read(p).ok()
+                } else {
+                    None
+                };
                 let mut preview_style = bubble.style.clone().unwrap_or_default();
-                let has_override = font_family.is_some() || font_size.is_some() || text_color.is_some() || stroke_color.is_some() || align.is_some();
+                let has_override = font_family.is_some()
+                    || font_size.is_some()
+                    || text_color.is_some()
+                    || stroke_color.is_some()
+                    || align.is_some();
                 // Apply overrides
-                if let Some(ff) = font_family { preview_style.font_family = Some(ff); }
-                if let Some(fs) = font_size { preview_style.font_size = Some(fs); }
+                if let Some(ff) = font_family {
+                    preview_style.font_family = Some(ff);
+                }
+                if let Some(fs) = font_size {
+                    preview_style.font_size = Some(fs);
+                }
                 if let Some(tc) = text_color {
-                    let parts: Vec<u8> = tc.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-                    if parts.len()==3 { preview_style.text_color = Some([parts[0],parts[1],parts[2]]); }
+                    let parts: Vec<u8> = tc
+                        .split(',')
+                        .filter_map(|v| v.trim().parse().ok())
+                        .collect();
+                    if parts.len() == 3 {
+                        preview_style.text_color = Some([parts[0], parts[1], parts[2]]);
+                    }
                 }
                 if let Some(sc) = stroke_color {
-                    let parts: Vec<u8> = sc.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-                    if parts.len()==3 { preview_style.stroke_color = Some([parts[0],parts[1],parts[2]]); }
+                    let parts: Vec<u8> = sc
+                        .split(',')
+                        .filter_map(|v| v.trim().parse().ok())
+                        .collect();
+                    if parts.len() == 3 {
+                        preview_style.stroke_color = Some([parts[0], parts[1], parts[2]]);
+                    }
                 }
-                if let Some(al) = align { preview_style.align = Some(al); }
-                let style_opt: Option<metadata::BubbleStyle> = if has_override || bubble.style.is_some() { Some(preview_style.clone()) } else { None };
-                // Resolve custom font for preview if needed
-                let custom_bytes: Option<Vec<u8>> = style_opt.as_ref().and_then(|s| s.font_family.as_ref()).and_then(|fname| kzktdk::font::FontRegistry::list().iter().find(|f| &f.name==fname).and_then(|info| std::fs::read(&info.path).ok()));
-                let typesetter = if let Some(ref bytes) = custom_bytes {
-                    Typesetter::new(bytes, cjk_bytes.as_deref()).unwrap_or_else(|_| Typesetter::new(&font_bytes, cjk_bytes.as_deref()).unwrap())
+                if let Some(al) = align {
+                    preview_style.align = Some(al);
+                }
+                let style_opt: Option<metadata::BubbleStyle> =
+                    if has_override || bubble.style.is_some() {
+                        Some(preview_style.clone())
+                    } else {
+                        None
+                    };
+                let session = kzktdk::editor::EditorSession::new(font_bytes, cjk_bytes)?;
+                let mut rgb = session.preview_bubble(
+                    &rgb_in,
+                    &data,
+                    &id,
+                    Some(&display_text),
+                    style_opt.as_ref(),
+                )?;
+                if thumb > 0 {
+                    rgb = kzktdk::editor::thumbnail(&rgb, thumb);
+                }
+                if let Some(ref out) = out_path {
+                    if let Some(parent) = out.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    rgb.save(out)?;
+                }
+                if to_stdout {
+                    let dynimg = image::DynamicImage::ImageRgb8(rgb);
+                    let mut buf = std::io::Cursor::new(Vec::new());
+                    dynimg.write_to(&mut buf, image::ImageFormat::Png)?;
+                    println!(
+                        "{}",
+                        base64::engine::general_purpose::STANDARD.encode(buf.into_inner())
+                    );
+                }
+                if quiet || to_stdout {
+                    eprintln!("Preview bubble {} show_raw={}", id, show_raw);
                 } else {
-                    Typesetter::new(&font_bytes, cjk_bytes.as_deref())?
-                };
-                typesetter.render_bubble_text_with_style(&mut rgb, &det, &display_text, Some(&data.target_lang), None, style_opt.as_ref());
-                if let Some(parent) = output.parent() { std::fs::create_dir_all(parent)?; }
-                rgb.save(&output)?;
-                println!("Preview bubble {} -> {:?}", id, output);
-                println!("Preview text: \"{}\" (font_size {:?}, align {:?}, font_family {:?}) show_raw={}", display_text, style_opt.as_ref().and_then(|s| s.font_size), style_opt.as_ref().and_then(|s| s.align.as_ref()), style_opt.as_ref().and_then(|s| s.font_family.as_ref()), show_raw);
+                    println!("Preview bubble {} -> {:?}", id, out_path);
+                    println!(
+                        "Preview text: \"{}\" (font_size {:?}, align {:?}, font_family {:?}) show_raw={}",
+                        display_text,
+                        style_opt.as_ref().and_then(|s| s.font_size),
+                        style_opt.as_ref().and_then(|s| s.align.as_ref()),
+                        style_opt.as_ref().and_then(|s| s.font_family.as_ref()),
+                        show_raw
+                    );
+                }
             }
-            MetadataCmd::Show { json, id } => {
-                let content = std::fs::read_to_string(&json).with_context(|| format!("Failed to read {:?}", json))?;
+            MetadataCmd::Show {
+                json,
+                id,
+                format,
+                quiet,
+            } => {
+                let as_json = format == "json";
+                let content = std::fs::read_to_string(&json)
+                    .with_context(|| format!("Failed to read {:?}", json))?;
                 if let Ok(proj) = serde_json::from_str::<metadata::Project>(&content) {
                     if proj.version == 1 && !proj.pages.is_empty() {
-                        println!("Project v{}: {} pages target_lang={:?}", proj.version, proj.pages.len(), proj.target_lang);
+                        if as_json {
+                            println!("{}", serde_json::to_string_pretty(&proj).unwrap());
+                            return Ok(());
+                        }
+                        if quiet {
+                            eprintln!(
+                                "Project v{}: {} pages target_lang={:?}",
+                                proj.version,
+                                proj.pages.len(),
+                                proj.target_lang
+                            );
+                        } else {
+                            println!(
+                                "Project v{}: {} pages target_lang={:?}",
+                                proj.version,
+                                proj.pages.len(),
+                                proj.target_lang
+                            );
+                        }
                         for (i, p) in proj.pages.iter().enumerate() {
                             let meta_path = {
                                 let pb = PathBuf::from(p);
-                                if pb.exists() { pb } else { json.parent().unwrap_or(Path::new(".")).join(Path::new(p).file_name().unwrap_or_default()) }
+                                if pb.exists() {
+                                    pb
+                                } else {
+                                    json.parent()
+                                        .unwrap_or(Path::new("."))
+                                        .join(Path::new(p).file_name().unwrap_or_default())
+                                }
                             };
-                            let bubbles = metadata::load_page_metadata(&meta_path).map(|d| d.bubbles.len()).unwrap_or(0);
-                            println!("  [{:02}] {} ({} bubbles)", i+1, p, bubbles);
+                            let bubbles = metadata::load_page_metadata(&meta_path)
+                                .map(|d| d.bubbles.len())
+                                .unwrap_or(0);
+                            println!("  [{:02}] {} ({} bubbles)", i + 1, p, bubbles);
                         }
                         return Ok(());
                     }
                 }
                 let data = metadata::load_page_metadata(&json)?;
-                println!("PageEditData v{}: {} ({}x{}) lang={} sig={} ocr={:?} — {} bubbles", data.version, data.page, data.width, data.height, data.target_lang, data.prompt_sig, data.ocr_engine, data.bubbles.len());
-                println!("{:<4} {:<18} {:<5} {:<6} {:<22} {:<12} {}", "ID", "BBOX", "CONF", "EDIT", "STYLE", "RAW", "TRANSLATED");
+                if as_json {
+                    if let Some(filter) = id.as_ref() {
+                        if let Some(b) = data.bubbles.iter().find(|b| &b.id == filter) {
+                            println!("{}", serde_json::to_string_pretty(b).unwrap());
+                        } else {
+                            eprintln!(
+                                "{}",
+                                serde_json::json!({"ok": false, "error": format!("Bubble {} not found", filter)})
+                            );
+                            std::process::exit(2);
+                        }
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&data).unwrap());
+                    }
+                    return Ok(());
+                }
+                if quiet {
+                    eprintln!(
+                        "PageEditData v{}: {} ({}x{}) lang={} sig={} ocr={:?} order={:?} — {} bubbles",
+                        data.version,
+                        data.page,
+                        data.width,
+                        data.height,
+                        data.target_lang,
+                        data.prompt_sig,
+                        data.ocr_engine,
+                        data.order,
+                        data.bubbles.len()
+                    );
+                } else {
+                    println!(
+                        "PageEditData v{}: {} ({}x{}) lang={} sig={} ocr={:?} order={:?} — {} bubbles",
+                        data.version,
+                        data.page,
+                        data.width,
+                        data.height,
+                        data.target_lang,
+                        data.prompt_sig,
+                        data.ocr_engine,
+                        data.order,
+                        data.bubbles.len()
+                    );
+                }
+                println!(
+                    "{:<4} {:<18} {:<5} {:<6} {:<22} {:<12} {}",
+                    "ID", "BBOX", "CONF", "EDIT", "STYLE", "RAW", "TRANSLATED"
+                );
                 println!("{}", "-".repeat(130));
                 for b in &data.bubbles {
-                    if let Some(ref filter) = id { if &b.id != filter { continue; } }
+                    if let Some(ref filter) = id {
+                        if &b.id != filter {
+                            continue;
+                        }
+                    }
                     let style_str = if let Some(s) = &b.style {
                         let mut parts = Vec::new();
-                        if let Some(f) = &s.font_family { parts.push(format!("font={}", f)); }
-                        if let Some(fz) = s.font_size { parts.push(format!("sz={}", fz)); }
-                        if let Some(c) = s.text_color { parts.push(format!("tc={},{},{}", c[0],c[1],c[2])); }
-                        if let Some(c) = s.stroke_color { parts.push(format!("sc={},{},{}", c[0],c[1],c[2])); }
-                        if let Some(a) = &s.align { parts.push(format!("al={}", a)); }
-                        if let Some(v) = s.is_bold { parts.push(format!("b={}", v)); }
-                        if let Some(v) = s.is_italic { parts.push(format!("i={}", v)); }
+                        if let Some(f) = &s.font_family {
+                            parts.push(format!("font={}", f));
+                        }
+                        if let Some(fz) = s.font_size {
+                            parts.push(format!("sz={}", fz));
+                        }
+                        if let Some(c) = s.text_color {
+                            parts.push(format!("tc={},{},{}", c[0], c[1], c[2]));
+                        }
+                        if let Some(c) = s.stroke_color {
+                            parts.push(format!("sc={},{},{}", c[0], c[1], c[2]));
+                        }
+                        if let Some(a) = &s.align {
+                            parts.push(format!("al={}", a));
+                        }
+                        if let Some(v) = s.is_bold {
+                            parts.push(format!("b={}", v));
+                        }
+                        if let Some(v) = s.is_italic {
+                            parts.push(format!("i={}", v));
+                        }
                         parts.join(",")
-                    } else { "-".to_string() };
+                    } else {
+                        "-".to_string()
+                    };
                     let t: String = {
                         let ch: Vec<char> = b.translated.chars().collect();
-                        if ch.len()>30 { ch[..30].iter().collect::<String>() + "..." } else { b.translated.clone() }
+                        if ch.len() > 30 {
+                            ch[..30].iter().collect::<String>() + "..."
+                        } else {
+                            b.translated.clone()
+                        }
                     };
                     let raw = if let Some(r) = &b.raw_text {
                         let ch: Vec<char> = r.chars().collect();
-                        if ch.len()>10 { ch[..10].iter().collect::<String>() + "..." } else { r.clone() }
-                    } else { "-".to_string() };
-                    let bbox = format!("[{},{},{},{}]", b.bbox[0],b.bbox[1],b.bbox[2],b.bbox[3]);
-                    println!("{:<4} {:<18} {:<5.2} {:<6} {:<22} {:<12} {}", b.id, bbox, b.conf, b.edited, style_str, raw.replace('\n'," "), t.replace('\n'," "));
+                        if ch.len() > 10 {
+                            ch[..10].iter().collect::<String>() + "..."
+                        } else {
+                            r.clone()
+                        }
+                    } else {
+                        "-".to_string()
+                    };
+                    let bbox = format!("[{},{},{},{}]", b.bbox[0], b.bbox[1], b.bbox[2], b.bbox[3]);
+                    println!(
+                        "{:<4} {:<18} {:<5.2} {:<6} {:<22} {:<12} {}",
+                        b.id,
+                        bbox,
+                        b.conf,
+                        b.edited,
+                        style_str,
+                        raw.replace('\n', " "),
+                        t.replace('\n', " ")
+                    );
                 }
             }
             MetadataCmd::Pack { input, output } => {
-                if !input.is_dir() { bail!("Pack input must be a folder: {:?}", input); }
-                let mut files: Vec<PathBuf> = std::fs::read_dir(&input)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file() && p.extension().map(|e| e.eq_ignore_ascii_case("jpg")||e.eq_ignore_ascii_case("png")||e.eq_ignore_ascii_case("jpeg")||e.eq_ignore_ascii_case("webp")).unwrap_or(false)).collect();
-                if files.is_empty() { bail!("No images found in {:?}", input); }
+                if !input.is_dir() {
+                    bail!("Pack input must be a folder: {:?}", input);
+                }
+                let mut files: Vec<PathBuf> = std::fs::read_dir(&input)?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_file()
+                            && p.extension()
+                                .map(|e| {
+                                    e.eq_ignore_ascii_case("jpg")
+                                        || e.eq_ignore_ascii_case("png")
+                                        || e.eq_ignore_ascii_case("jpeg")
+                                        || e.eq_ignore_ascii_case("webp")
+                                })
+                                .unwrap_or(false)
+                    })
+                    .collect();
+                if files.is_empty() {
+                    bail!("No images found in {:?}", input);
+                }
                 // natural sort
-                files.sort_by(|a,b| natord::compare(&a.file_name().unwrap().to_string_lossy(), &b.file_name().unwrap().to_string_lossy()));
-                if let Some(parent) = output.parent() { std::fs::create_dir_all(parent)?; }
+                files.sort_by(|a, b| {
+                    natord::compare(
+                        &a.file_name().unwrap().to_string_lossy(),
+                        &b.file_name().unwrap().to_string_lossy(),
+                    )
+                });
+                if let Some(parent) = output.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 archive::create_cbz(&files, &output)?;
                 println!("Packed {} images -> {:?}", files.len(), output);
-                for (i,f) in files.iter().enumerate() { println!("  [{:02}] {}", i+1, f.file_name().unwrap().to_string_lossy()); }
+                for (i, f) in files.iter().enumerate() {
+                    println!(
+                        "  [{:02}] {}",
+                        i + 1,
+                        f.file_name().unwrap().to_string_lossy()
+                    );
+                }
             }
-        }
+            MetadataCmd::Watch {
+                project,
+                images,
+                output,
+                font,
+                cjk_font,
+                interval,
+                once,
+            } => {
+                let font_bytes_global = if font.exists() {
+                    std::fs::read(&font)?
+                } else if let Some(p) = find_file_in_candidates("fonts/Komika Axis.ttf") {
+                    std::fs::read(p)?
+                } else {
+                    include_bytes!("../fonts/Komika Axis.ttf").to_vec()
+                };
+                let cjk_bytes_global = if cjk_font.exists() {
+                    std::fs::read(&cjk_font).ok()
+                } else if let Some(p) = find_file_in_candidates("fonts/KosugiMaru.ttf") {
+                    std::fs::read(p).ok()
+                } else {
+                    None
+                };
+                let session =
+                    kzktdk::editor::EditorSession::new(font_bytes_global, cjk_bytes_global)?;
+                std::fs::create_dir_all(&output)?;
+                let proj_dir = project.parent().unwrap_or(Path::new(".")).to_path_buf();
+                let mut hashes: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                let mut mtimes: std::collections::HashMap<PathBuf, std::time::SystemTime> =
+                    std::collections::HashMap::new();
+                let mut render_once = |hashes: &mut std::collections::HashMap<String, String>| -> Result<(usize, usize)> {
+                    let proj = metadata::load_project(&project).with_context(|| format!("Failed to load project {:?}", project))?;
+                    let mut ok = 0usize;
+                    let mut dirty = 0usize;
+                    for (idx, page_meta_str) in proj.pages.iter().enumerate() {
+                        let meta_path = {
+                            let p = PathBuf::from(page_meta_str);
+                            if p.exists() { p } else { proj_dir.join(Path::new(page_meta_str).file_name().unwrap_or_default()) }
+                        };
+                        let data = metadata::load_page_metadata(&meta_path).with_context(|| format!("Failed to load {:?}", meta_path))?;
+                        let img_path = if let Some(ref img_dir) = images {
+                            let cand = img_dir.join(&data.page);
+                            if cand.exists() { cand } else { proj_dir.join(&data.page) }
+                        } else {
+                            let cand = meta_path.with_file_name(&data.page);
+                            if cand.exists() { cand } else { PathBuf::from(&data.page) }
+                        };
+                        if !img_path.exists() {
+                            eprintln!("{}", serde_json::json!({"idx": idx+1, "total": proj.pages.len(), "page": data.page, "ok": false, "error": "image not found"}));
+                            continue;
+                        }
+                        let h = kzktdk::editor::bubbles_hash(&data);
+                        let mt = std::fs::metadata(&meta_path).and_then(|m| m.modified()).ok();
+                        let mt_img = std::fs::metadata(&img_path).and_then(|m| m.modified()).ok();
+                        let key = meta_path.to_string_lossy().to_string();
+                        let prev = hashes.get(&key);
+                        // Also treat mtime change as dirty even if hash equal (e.g. order-only touch).
+                        let dirty_page = prev != Some(&h);
+                        if !dirty_page {
+                            continue;
+                        }
+                        let _ = (mt, mt_img);
+                        dirty += 1;
+                        let t0 = std::time::Instant::now();
+                        match image::open(&img_path) {
+                            Ok(img) => {
+                                let rgb_in = img.to_rgb8();
+                                match session.render_page(&rgb_in, &data) {
+                                    Ok(rgb) => {
+                                        let out_path = output.join(Path::new(&data.page).file_name().unwrap_or_else(|| std::ffi::OsStr::new(&data.page)));
+                                        match rgb.save(&out_path) {
+                                            Ok(()) => {
+                                                ok += 1;
+                                                hashes.insert(key, h);
+                                                eprintln!("{}", serde_json::json!({"idx": idx+1, "total": proj.pages.len(), "page": data.page, "out": out_path.to_string_lossy(), "ok": true, "ms": t0.elapsed().as_millis() as u64}));
+                                            }
+                                            Err(e) => eprintln!("{}", serde_json::json!({"idx": idx+1, "total": proj.pages.len(), "page": data.page, "ok": false, "error": e.to_string()})),
+                                        }
+                                    }
+                                    Err(e) => eprintln!("{}", serde_json::json!({"idx": idx+1, "total": proj.pages.len(), "page": data.page, "ok": false, "error": e.to_string()})),
+                                }
+                            }
+                            Err(e) => eprintln!("{}", serde_json::json!({"idx": idx+1, "total": proj.pages.len(), "page": data.page, "ok": false, "error": e.to_string()})),
+                        }
+                    }
+                    let _ = &mut mtimes;
+                    Ok((ok, dirty))
+                };
+                // Initial full render (all hashes empty => everything dirty).
+                let (ok, dirty) = render_once(&mut hashes)?;
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"done": true, "ok_count": ok, "dirty": dirty})
+                );
+                if once {
+                    return Ok(());
+                }
+                eprintln!("[Watch] polling every {}s — Ctrl-C to stop", interval);
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+                    match render_once(&mut hashes) {
+                        Ok((ok, dirty)) => {
+                            if dirty > 0 {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({"done": true, "ok_count": ok, "dirty": dirty})
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "{}",
+                            serde_json::json!({"ok": false, "error": e.to_string()})
+                        ),
+                    }
+                }
+            }
+        },
 
         Commands::Font { cmd } => match cmd {
             FontCmd::Import { path, name } => {
                 let imported = kzktdk::font::FontRegistry::import(&path, name)?;
                 println!("Imported font '{}' from {:?}", imported, path);
             }
-            FontCmd::List => {
+            FontCmd::List { format, quiet } => {
+                let as_json = format == "json";
                 let fonts = kzktdk::font::FontRegistry::list();
+                if as_json {
+                    let out = serde_json::json!({
+                        "fonts": fonts,
+                        "default_latin": kzktdk::font::AppConfig::get_latin(),
+                        "default_cjk": kzktdk::font::AppConfig::get_cjk(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+                    return Ok(());
+                }
+                if quiet {
+                    eprintln!("Imported fonts: {}", fonts.len());
+                    for f in &fonts {
+                        eprintln!("  - {} ({} has_cjk={})", f.name, f.path, f.has_cjk);
+                    }
+                    return Ok(());
+                }
                 if fonts.is_empty() {
                     println!("No imported fonts. Default: Komika Axis, KosugiMaru (embedded)");
                 } else {
                     println!("Imported fonts:");
-                    for f in fonts { println!("  - {} ({} has_cjk={})", f.name, f.path, f.has_cjk); }
+                    for f in fonts {
+                        println!("  - {} ({} has_cjk={})", f.name, f.path, f.has_cjk);
+                    }
                 }
                 println!("Default: Komika Axis, KosugiMaru (embedded)");
-                if let Some(def) = kzktdk::font::AppConfig::get_latin() { println!("Global default latin: {}", def); }
-                if let Some(def) = kzktdk::font::AppConfig::get_cjk() { println!("Global default cjk: {}", def); }
+                if let Some(def) = kzktdk::font::AppConfig::get_latin() {
+                    println!("Global default latin: {}", def);
+                }
+                if let Some(def) = kzktdk::font::AppConfig::get_cjk() {
+                    println!("Global default cjk: {}", def);
+                }
             }
             FontCmd::Remove { name } => {
                 kzktdk::font::FontRegistry::remove(&name)?;
@@ -1746,11 +3042,45 @@ async fn main() -> Result<()> {
                     println!("Set global default Latin font to '{}'", name);
                 }
             }
-            FontCmd::GetDefault => {
-                if let Some(def) = kzktdk::font::AppConfig::get_latin() { println!("Global default latin: {}", def); } else { println!("Global default latin: Komika Axis (embedded)"); }
-                if let Some(def) = kzktdk::font::AppConfig::get_cjk() { println!("Global default cjk: {}", def); } else { println!("Global default cjk: KosugiMaru (embedded)"); }
+            FontCmd::GetDefault { format, quiet } => {
+                let as_json = format == "json";
+                let latin = kzktdk::font::AppConfig::get_latin();
+                let cjk = kzktdk::font::AppConfig::get_cjk();
+                if as_json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({"default_latin": latin, "default_cjk": cjk})
+                        )
+                        .unwrap()
+                    );
+                    return Ok(());
+                }
+                if quiet {
+                    if let Some(def) = latin {
+                        eprintln!("Global default latin: {}", def);
+                    } else {
+                        eprintln!("Global default latin: Komika Axis (embedded)");
+                    }
+                    if let Some(def) = cjk {
+                        eprintln!("Global default cjk: {}", def);
+                    } else {
+                        eprintln!("Global default cjk: KosugiMaru (embedded)");
+                    }
+                    return Ok(());
+                }
+                if let Some(def) = latin {
+                    println!("Global default latin: {}", def);
+                } else {
+                    println!("Global default latin: Komika Axis (embedded)");
+                }
+                if let Some(def) = cjk {
+                    println!("Global default cjk: {}", def);
+                } else {
+                    println!("Global default cjk: KosugiMaru (embedded)");
+                }
             }
-        }
+        },
     }
 
     Ok(())
@@ -1805,8 +3135,12 @@ async fn translate_page(
             if engine.name() == "none" {
                 eprintln!("[freetext] engine none, skip freetext");
             } else {
-                let bubble_boxes: Vec<[u32; 4]> = detections.iter().map(|d| [d.x1, d.y1, d.x2, d.y2]).collect();
-                let detected = kzktdk::preparer::detect_free_text(&orig_rgb, &bubble_boxes, engine.as_ref());
+                let bubble_boxes: Vec<[u32; 4]> = detections
+                    .iter()
+                    .map(|d| [d.x1, d.y1, d.x2, d.y2])
+                    .collect();
+                let detected =
+                    kzktdk::preparer::detect_free_text(&orig_rgb, &bubble_boxes, engine.as_ref());
                 if detected.is_empty() {
                     println!("    [Freetext] 0 regions");
                 } else {
@@ -1823,7 +3157,13 @@ async fn translate_page(
     for (idx, fb) in ft_boxes.iter().enumerate() {
         let fid = format!("ft{}", idx + 1);
         ft_ids.push(fid);
-        combined_dets.push(kzktdk::model::yolo::Detection { x1: fb[0], y1: fb[1], x2: fb[2], y2: fb[3], conf: 0.90 });
+        combined_dets.push(kzktdk::model::yolo::Detection {
+            x1: fb[0],
+            y1: fb[1],
+            x2: fb[2],
+            y2: fb[3],
+            conf: 0.90,
+        });
     }
     if detections.is_empty() && combined_dets.is_empty() {
         println!("    [Page] No bubbles nor freetext, copying original.");
@@ -1836,20 +3176,52 @@ async fn translate_page(
     for (i, det) in detections.iter().enumerate() {
         let w = det.width();
         let h = det.height();
-        if w == 0 || h == 0 { continue; }
-        println!("      Bubble #{}: [{}, {}, {}, {}] ({}x{})", i+1, det.x1, det.y1, det.x2, det.y2, w, h);
+        if w == 0 || h == 0 {
+            continue;
+        }
+        println!(
+            "      Bubble #{}: [{}, {}, {}, {}] ({}x{})",
+            i + 1,
+            det.x1,
+            det.y1,
+            det.x2,
+            det.y2,
+            w,
+            h
+        );
         let mut crop = RgbImage::new(w, h);
-        for cy in 0..h { for cx in 0..w { crop.put_pixel(cx, cy, *orig_rgb.get_pixel(det.x1+cx, det.y1+cy)); } }
-        crops.push(CropItem { id: (i+1).to_string(), image: crop });
+        for cy in 0..h {
+            for cx in 0..w {
+                crop.put_pixel(cx, cy, *orig_rgb.get_pixel(det.x1 + cx, det.y1 + cy));
+            }
+        }
+        crops.push(CropItem {
+            id: (i + 1).to_string(),
+            image: crop,
+        });
     }
     for (i, fb) in ft_boxes.iter().enumerate() {
         let pad = kzktdk::preparer::freetext_pad(*fb, w_img, h_img);
-        let w = (pad[2]-pad[0]).max(1);
-        let h = (pad[3]-pad[1]).max(1);
-        println!("      Freetext #{}: {:?} padded {:?} ({}x{})", i+1, fb, pad, w, h);
+        let w = (pad[2] - pad[0]).max(1);
+        let h = (pad[3] - pad[1]).max(1);
+        println!(
+            "      Freetext #{}: {:?} padded {:?} ({}x{})",
+            i + 1,
+            fb,
+            pad,
+            w,
+            h
+        );
         let mut crop = RgbImage::new(w, h);
-        for cy in 0..h { for cx in 0..w { crop.put_pixel(cx, cy, *orig_rgb.get_pixel(pad[0]+cx, pad[1]+cy)); } }
-        crops.push(CropItem { id: format!("ft{}", i+1), image: crop });
+        for cy in 0..h {
+            for cx in 0..w {
+                crop.put_pixel(cx, cy, *orig_rgb.get_pixel(pad[0] + cx, pad[1] + cy));
+            }
+        }
+        crops.push(CropItem {
+            id: format!("ft{}", i + 1),
+            image: crop,
+        });
     }
 
     // --- OCR raw_text gathering (for metadata) ---
@@ -1862,29 +3234,51 @@ async fn translate_page(
             for c in &crops {
                 // find bbox for this id
                 let bbox_opt = if c.id.starts_with("ft") {
-                    ft_boxes.get(c.id[2..].parse::<usize>().unwrap_or(1)-1).copied()
+                    ft_boxes
+                        .get(c.id[2..].parse::<usize>().unwrap_or(1) - 1)
+                        .copied()
                 } else {
-                    c.id.parse::<usize>().ok().and_then(|idx| detections.get(idx-1)).map(|d| [d.x1,d.y1,d.x2,d.y2])
+                    c.id.parse::<usize>()
+                        .ok()
+                        .and_then(|idx| detections.get(idx - 1))
+                        .map(|d| [d.x1, d.y1, d.x2, d.y2])
                 };
                 if let Some(bbox) = bbox_opt {
                     if let Some(txt) = engine.recognize(&orig_rgb, bbox) {
-                        if !txt.trim().is_empty() { raw_map.insert(c.id.clone(), txt); }
+                        if !txt.trim().is_empty() {
+                            raw_map.insert(c.id.clone(), txt);
+                        }
                     }
                 }
             }
-            if !raw_map.is_empty() { println!("    [OCR] raw_text {} entries", raw_map.len()); }
+            if !raw_map.is_empty() {
+                println!("    [OCR] raw_text {} entries", raw_map.len());
+            }
         }
     }
 
     // --- Translation branching ---
-    let mut all_translations: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut all_translations: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Cache filter first
     let crops_to_translate: Vec<CropItem>;
     if let Some(cache) = ctx.cache {
         let prov_name = ctx.chain.primary.name();
         let model_name = ctx.chain.primary.model_name();
-        let (cached, to_trans) = cache.filter_cached(&crops, ctx.target_lang, prov_name, model_name, ctx.prompt_sig);
-        if !cached.is_empty() { println!("      [Cache Hit] {}/{} from cache", cached.len(), crops.len()); }
+        let (cached, to_trans) = cache.filter_cached(
+            &crops,
+            ctx.target_lang,
+            prov_name,
+            model_name,
+            ctx.prompt_sig,
+        );
+        if !cached.is_empty() {
+            println!(
+                "      [Cache Hit] {}/{} from cache",
+                cached.len(),
+                crops.len()
+            );
+        }
         all_translations.extend(cached);
         crops_to_translate = to_trans;
     } else {
@@ -1892,28 +3286,53 @@ async fn translate_page(
     }
 
     // Normalize ft ids to lowercase (LLM may return FT1)
-    fn norm_map(mut m: std::collections::HashMap<String,String>) -> std::collections::HashMap<String,String> {
+    fn norm_map(
+        mut m: std::collections::HashMap<String, String>,
+    ) -> std::collections::HashMap<String, String> {
         let mut out = std::collections::HashMap::new();
-        for (k,v) in m.drain() {
-            let nk = if k.to_lowercase().starts_with("ft") { k.to_lowercase() } else { k };
+        for (k, v) in m.drain() {
+            let nk = if k.to_lowercase().starts_with("ft") {
+                k.to_lowercase()
+            } else {
+                k
+            };
             out.insert(nk, v);
         }
         out
     }
     // Helper for text-only translation
-    async fn translate_ocr_json(chain: &ProviderChain, limiter: &RateLimiter, json_input: &str, prompt: &str, target_lang: &str) -> Result<std::collections::HashMap<String,String>> {
-        let full_prompt = format!("{}\n\nInput JSON (id -> raw Japanese text):\n{}\n\nTranslate each value to {} and return JSON mapping id->translation.", prompt, json_input, target_lang);
+    async fn translate_ocr_json(
+        chain: &ProviderChain,
+        limiter: &RateLimiter,
+        json_input: &str,
+        prompt: &str,
+        target_lang: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let full_prompt = format!(
+            "{}\n\nInput JSON (id -> raw Japanese text):\n{}\n\nTranslate each value to {} and return JSON mapping id->translation.",
+            prompt, json_input, target_lang
+        );
         for prov in chain.all_providers() {
-            println!("  Translating OCR JSON with {} ({})...", prov.name(), prov.model_name());
-            let raw_res = limiter.execute_with_retry(|| prov.translate_text(json_input, &full_prompt)).await;
+            println!(
+                "  Translating OCR JSON with {} ({})...",
+                prov.name(),
+                prov.model_name()
+            );
+            let raw_res = limiter
+                .execute_with_retry(|| prov.translate_text(json_input, &full_prompt))
+                .await;
             match raw_res {
                 Ok(raw) => {
                     if let Ok(map) = kzktdk::translation::parse_translation_json(&raw) {
-                        if !map.is_empty() { return Ok(norm_map(map)); }
+                        if !map.is_empty() {
+                            return Ok(norm_map(map));
+                        }
                     }
                     println!("  [Failover] {} unparseable OCR json", prov.name());
                 }
-                Err(e) => { println!("  [Failover] {} failed ocr json: {}", prov.name(), e); }
+                Err(e) => {
+                    println!("  [Failover] {} failed ocr json: {}", prov.name(), e);
+                }
             }
         }
         bail!("All providers failed OCR JSON translation")
@@ -1932,29 +3351,86 @@ async fn translate_page(
             // Build json for to_translate subset filtered by raw_map
             let mut ocr_json_map = serde_json::Map::new();
             for c in &crops_to_translate {
-                if let Some(raw) = raw_map.get(&c.id) { ocr_json_map.insert(c.id.clone(), serde_json::Value::String(raw.clone())); }
+                if let Some(raw) = raw_map.get(&c.id) {
+                    ocr_json_map.insert(c.id.clone(), serde_json::Value::String(raw.clone()));
+                }
             }
             if ocr_json_map.is_empty() {
                 // fallback vision if no raw
                 for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
                     let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
-                    let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
-                    if let Some(cache) = ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                    let chunk_trans = translate_with_chain(
+                        ctx.chain,
+                        &mosaic,
+                        ctx.prompt,
+                        ctx.target_lang,
+                        ctx.rate_limiter,
+                    )
+                    .await?;
+                    if let Some(cache) = ctx.cache {
+                        let pn = ctx.chain.primary.name();
+                        let mn = ctx.chain.primary.model_name();
+                        cache.save_batch(
+                            &chunk_trans,
+                            chunk,
+                            ctx.target_lang,
+                            pn,
+                            mn,
+                            ctx.prompt_sig,
+                        );
+                    }
                     all_translations.extend(chunk_trans);
                 }
             } else {
                 let json_str = serde_json::Value::Object(ocr_json_map).to_string();
-                match translate_ocr_json(ctx.chain, ctx.rate_limiter, &json_str, ctx.prompt, ctx.target_lang).await {
+                match translate_ocr_json(
+                    ctx.chain,
+                    ctx.rate_limiter,
+                    &json_str,
+                    ctx.prompt,
+                    ctx.target_lang,
+                )
+                .await
+                {
                     Ok(map) => {
-                        if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&map, &crops_to_translate, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                        if let Some(cache) = ctx.cache {
+                            let pn = ctx.chain.primary.name();
+                            let mn = ctx.chain.primary.model_name();
+                            cache.save_batch(
+                                &map,
+                                &crops_to_translate,
+                                ctx.target_lang,
+                                pn,
+                                mn,
+                                ctx.prompt_sig,
+                            );
+                        }
                         all_translations.extend(map);
                     }
                     Err(e) => {
                         eprintln!("[OCR] text translation failed: {}, fallback vision", e);
                         for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
                             let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
-                            let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
-                            if let Some(cache) = ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                            let chunk_trans = translate_with_chain(
+                                ctx.chain,
+                                &mosaic,
+                                ctx.prompt,
+                                ctx.target_lang,
+                                ctx.rate_limiter,
+                            )
+                            .await?;
+                            if let Some(cache) = ctx.cache {
+                                let pn = ctx.chain.primary.name();
+                                let mn = ctx.chain.primary.model_name();
+                                cache.save_batch(
+                                    &chunk_trans,
+                                    chunk,
+                                    ctx.target_lang,
+                                    pn,
+                                    mn,
+                                    ctx.prompt_sig,
+                                );
+                            }
                             all_translations.extend(chunk_trans);
                         }
                     }
@@ -1963,26 +3439,78 @@ async fn translate_page(
         } else if ctx.mode == "auto" && ocr_available && !raw_map.is_empty() {
             // auto: try ocr first, fallback vision on failure
             let mut ocr_json_map = serde_json::Map::new();
-            for c in &crops_to_translate { if let Some(raw)=raw_map.get(&c.id) { ocr_json_map.insert(c.id.clone(), serde_json::Value::String(raw.clone())); } }
+            for c in &crops_to_translate {
+                if let Some(raw) = raw_map.get(&c.id) {
+                    ocr_json_map.insert(c.id.clone(), serde_json::Value::String(raw.clone()));
+                }
+            }
             if ocr_json_map.is_empty() {
                 for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
                     let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
-                    let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
-                    if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                    let chunk_trans = translate_with_chain(
+                        ctx.chain,
+                        &mosaic,
+                        ctx.prompt,
+                        ctx.target_lang,
+                        ctx.rate_limiter,
+                    )
+                    .await?;
+                    if let Some(cache) = ctx.cache {
+                        let pn = ctx.chain.primary.name();
+                        let mn = ctx.chain.primary.model_name();
+                        cache.save_batch(
+                            &chunk_trans,
+                            chunk,
+                            ctx.target_lang,
+                            pn,
+                            mn,
+                            ctx.prompt_sig,
+                        );
+                    }
                     all_translations.extend(chunk_trans);
                 }
             } else {
                 let json_str = serde_json::Value::Object(ocr_json_map).to_string();
-                match translate_ocr_json(ctx.chain, ctx.rate_limiter, &json_str, ctx.prompt, ctx.target_lang).await {
+                match translate_ocr_json(
+                    ctx.chain,
+                    ctx.rate_limiter,
+                    &json_str,
+                    ctx.prompt,
+                    ctx.target_lang,
+                )
+                .await
+                {
                     Ok(map) => {
-                        if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&map, &crops_to_translate, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                        if let Some(cache) = ctx.cache {
+                            let pn = ctx.chain.primary.name();
+                            let mn = ctx.chain.primary.model_name();
+                            cache.save_batch(
+                                &map,
+                                &crops_to_translate,
+                                ctx.target_lang,
+                                pn,
+                                mn,
+                                ctx.prompt_sig,
+                            );
+                        }
                         all_translations.extend(map);
                         // fill missing ids via vision
-                        let missing: Vec<CropItem> = crops_to_translate.iter().filter(|c| !all_translations.contains_key(&c.id)).cloned().collect();
+                        let missing: Vec<CropItem> = crops_to_translate
+                            .iter()
+                            .filter(|c| !all_translations.contains_key(&c.id))
+                            .cloned()
+                            .collect();
                         if !missing.is_empty() {
                             for chunk in missing.chunks(ctx.batch_size.max(1)) {
                                 let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
-                                let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
+                                let chunk_trans = translate_with_chain(
+                                    ctx.chain,
+                                    &mosaic,
+                                    ctx.prompt,
+                                    ctx.target_lang,
+                                    ctx.rate_limiter,
+                                )
+                                .await?;
                                 all_translations.extend(chunk_trans);
                             }
                         }
@@ -1990,8 +3518,26 @@ async fn translate_page(
                     Err(_) => {
                         for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
                             let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
-                            let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
-                            if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                            let chunk_trans = translate_with_chain(
+                                ctx.chain,
+                                &mosaic,
+                                ctx.prompt,
+                                ctx.target_lang,
+                                ctx.rate_limiter,
+                            )
+                            .await?;
+                            if let Some(cache) = ctx.cache {
+                                let pn = ctx.chain.primary.name();
+                                let mn = ctx.chain.primary.model_name();
+                                cache.save_batch(
+                                    &chunk_trans,
+                                    chunk,
+                                    ctx.target_lang,
+                                    pn,
+                                    mn,
+                                    ctx.prompt_sig,
+                                );
+                            }
                             all_translations.extend(chunk_trans);
                         }
                     }
@@ -2001,8 +3547,19 @@ async fn translate_page(
             // vision
             for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
                 let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
-                let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
-                if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                let chunk_trans = translate_with_chain(
+                    ctx.chain,
+                    &mosaic,
+                    ctx.prompt,
+                    ctx.target_lang,
+                    ctx.rate_limiter,
+                )
+                .await?;
+                if let Some(cache) = ctx.cache {
+                    let pn = ctx.chain.primary.name();
+                    let mn = ctx.chain.primary.model_name();
+                    cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig);
+                }
                 all_translations.extend(chunk_trans);
             }
         }
@@ -2010,42 +3567,114 @@ async fn translate_page(
 
     // normalize ft keys to lowercase
     all_translations = norm_map(all_translations);
-    for (k,v) in &all_translations { println!("      #{} -> \"{}\"", k, v); }
+    for (k, v) in &all_translations {
+        println!("      #{} -> \"{}\"", k, v);
+    }
 
     // Inpaint + typeset for combined (bubbles + ft)
     let mut page = orig_rgb.clone();
-    let inpaint_targets: Vec<kzktdk::model::yolo::Detection> = combined_dets.iter().enumerate().filter(|(i,_)| {
-        let id = if *i < detections.len() { (i+1).to_string() } else { format!("ft{}", i - detections.len() +1) };
-        if let Some(t)=all_translations.get(&id) { t.to_uppercase()!="SKIP" && !t.trim().is_empty() } else { false }
-    }).map(|(_,d)| d.clone()).collect();
-    if !inpaint_targets.is_empty() { inpaint_image(&mut page, &inpaint_targets)?; }
+    let inpaint_targets: Vec<kzktdk::model::yolo::Detection> = combined_dets
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let id = if *i < detections.len() {
+                (i + 1).to_string()
+            } else {
+                format!("ft{}", i - detections.len() + 1)
+            };
+            if let Some(t) = all_translations.get(&id) {
+                t.to_uppercase() != "SKIP" && !t.trim().is_empty()
+            } else {
+                false
+            }
+        })
+        .map(|(_, d)| d.clone())
+        .collect();
+    if !inpaint_targets.is_empty() {
+        inpaint_image(&mut page, &inpaint_targets)?;
+    }
     let typesetter = Typesetter::new(ctx.font_bytes, ctx.cjk_font_bytes)?;
     for (idx, det) in combined_dets.iter().enumerate() {
-        let id = if idx < detections.len() { (idx+1).to_string() } else { format!("ft{}", idx - detections.len() +1) };
-        if let Some(text)=all_translations.get(&id) {
-            if text.to_uppercase()=="SKIP" || text.trim().is_empty() { continue; }
-            typesetter.render_bubble_text_with_style(&mut page, det, text, Some(ctx.target_lang), None, None);
+        let id = if idx < detections.len() {
+            (idx + 1).to_string()
+        } else {
+            format!("ft{}", idx - detections.len() + 1)
+        };
+        if let Some(text) = all_translations.get(&id) {
+            if text.to_uppercase() == "SKIP" || text.trim().is_empty() {
+                continue;
+            }
+            typesetter.render_bubble_text_with_style(
+                &mut page,
+                det,
+                text,
+                Some(ctx.target_lang),
+                None,
+                None,
+            );
         }
     }
     page.save(output_path)?;
 
     if ctx.save_metadata {
-        let page_name = input_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let page_name = input_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let mut bubbles: Vec<metadata::Bubble> = Vec::new();
         for (i, det) in detections.iter().enumerate() {
-            let id = (i+1).to_string();
-            bubbles.push(metadata::Bubble { id: id.clone(), bbox: [det.x1,det.y1,det.x2,det.y2], conf: det.conf, translated: all_translations.get(&id).cloned().unwrap_or_default(), bg_color: None, style: None, edited: false, raw_text: raw_map.get(&id).cloned() });
+            let id = (i + 1).to_string();
+            bubbles.push(metadata::Bubble {
+                id: id.clone(),
+                bbox: [det.x1, det.y1, det.x2, det.y2],
+                conf: det.conf,
+                translated: all_translations.get(&id).cloned().unwrap_or_default(),
+                bg_color: None,
+                style: None,
+                edited: false,
+                raw_text: raw_map.get(&id).cloned(),
+                mask_path: None,
+            });
         }
         for (i, fb) in ft_boxes.iter().enumerate() {
-            let id = format!("ft{}", i+1);
+            let id = format!("ft{}", i + 1);
             // sample bg median not critical
-            bubbles.push(metadata::Bubble { id: id.clone(), bbox: *fb, conf: 0.90, translated: all_translations.get(&id).cloned().unwrap_or_default(), bg_color: None, style: None, edited: false, raw_text: raw_map.get(&id).cloned() });
+            bubbles.push(metadata::Bubble {
+                id: id.clone(),
+                bbox: *fb,
+                conf: 0.90,
+                translated: all_translations.get(&id).cloned().unwrap_or_default(),
+                bg_color: None,
+                style: None,
+                edited: false,
+                raw_text: raw_map.get(&id).cloned(),
+                mask_path: None,
+            });
         }
-        let mut data = metadata::PageEditData::new(page_name.clone(), w_img, h_img, ctx.target_lang.to_string(), ctx.prompt_sig.to_string(), bubbles);
-        if ctx.ocr != "none" { data.ocr_engine = Some(ctx.ocr.clone()); }
-        let meta_dir = ctx.metadata_dir.clone().unwrap_or_else(|| output_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        let mut data = metadata::PageEditData::new(
+            page_name.clone(),
+            w_img,
+            h_img,
+            ctx.target_lang.to_string(),
+            ctx.prompt_sig.to_string(),
+            bubbles,
+        );
+        if ctx.ocr != "none" {
+            data.ocr_engine = Some(ctx.ocr.clone());
+        }
+        let meta_dir = ctx
+            .metadata_dir
+            .clone()
+            .unwrap_or_else(|| output_path.parent().unwrap_or(Path::new(".")).to_path_buf());
         std::fs::create_dir_all(&meta_dir)?;
-        let meta_path = meta_dir.join(format!("{}.kedit.json", output_path.file_stem().unwrap_or_default().to_string_lossy()));
+        let meta_path = meta_dir.join(format!(
+            "{}.kedit.json",
+            output_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ));
         metadata::save_page_metadata(&meta_path, &data)?;
         println!("    [Metadata] Saved to {:?}", meta_path);
     }

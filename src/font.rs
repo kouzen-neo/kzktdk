@@ -1,5 +1,5 @@
+use ab_glyph::{Font, FontArc};
 use anyhow::{Context, Result, bail};
-use ab_glyph::{FontArc, Font};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -59,20 +59,33 @@ impl FontRegistry {
         }
         let data = std::fs::read(path).with_context(|| format!("Failed to read {:?}", path))?;
         // Validate TTF
-        let font = ab_glyph::FontRef::try_from_slice(&data).context("Invalid font file (not TTF/OTF)")?;
+        let font =
+            ab_glyph::FontRef::try_from_slice(&data).context("Invalid font file (not TTF/OTF)")?;
         // Check has glyph A
         if font.glyph_id('A').0 == 0 && font.glyph_id('a').0 == 0 {
             bail!("Font has no Latin glyphs");
         }
         let has_cjk = font.glyph_id('あ').0 != 0 || font.glyph_id('中').0 != 0;
-        let font_name = name.unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().to_string());
+        let font_name = name.unwrap_or_else(|| {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
         let dir = fonts_dir();
         std::fs::create_dir_all(&dir)?;
         let dest = dir.join(format!("{}.ttf", font_name));
         std::fs::copy(path, &dest).with_context(|| format!("Failed to copy to {:?}", dest))?;
 
         let mut reg = Self::load_registry();
-        reg.fonts.insert(font_name.clone(), FontInfo { name: font_name.clone(), path: dest.to_string_lossy().to_string(), has_cjk });
+        reg.fonts.insert(
+            font_name.clone(),
+            FontInfo {
+                name: font_name.clone(),
+                path: dest.to_string_lossy().to_string(),
+                has_cjk,
+            },
+        );
         Self::save_registry(&reg)?;
         Ok(font_name)
     }
@@ -80,7 +93,7 @@ impl FontRegistry {
     pub fn list() -> Vec<FontInfo> {
         let reg = Self::load_registry();
         let mut v: Vec<FontInfo> = reg.fonts.values().cloned().collect();
-        v.sort_by(|a,b| a.name.cmp(&b.name));
+        v.sort_by(|a, b| a.name.cmp(&b.name));
         v
     }
 
@@ -115,22 +128,30 @@ impl FontRegistry {
         // Try registry by name
         let reg = Self::load_registry();
         if let Some(info) = reg.fonts.get(name_or_path) {
-            let data = std::fs::read(&info.path).with_context(|| format!("Failed to read {:?}", info.path))?;
+            let data = std::fs::read(&info.path)
+                .with_context(|| format!("Failed to read {:?}", info.path))?;
             let font = FontArc::try_from_vec(data).context("Invalid font file in registry")?;
             return Ok(font);
         }
         // Try default embedded
-        if name_or_path.eq_ignore_ascii_case("Komika Axis") || name_or_path.eq_ignore_ascii_case("komika") {
+        if name_or_path.eq_ignore_ascii_case("Komika Axis")
+            || name_or_path.eq_ignore_ascii_case("komika")
+        {
             let data = include_bytes!("../fonts/Komika Axis.ttf").to_vec();
             let font = FontArc::try_from_vec(data).unwrap();
             return Ok(font);
         }
-        if name_or_path.eq_ignore_ascii_case("KosugiMaru") || name_or_path.eq_ignore_ascii_case("kosugi") {
+        if name_or_path.eq_ignore_ascii_case("KosugiMaru")
+            || name_or_path.eq_ignore_ascii_case("kosugi")
+        {
             let data = include_bytes!("../fonts/KosugiMaru.ttf").to_vec();
             let font = FontArc::try_from_vec(data).unwrap();
             return Ok(font);
         }
-        bail!("Font '{}' not found. Run `kzktdk font list` or provide a file path", name_or_path);
+        bail!(
+            "Font '{}' not found. Run `kzktdk font list` or provide a file path",
+            name_or_path
+        );
     }
 
     fn load_registry() -> FontRegistryFile {
@@ -145,7 +166,9 @@ impl FontRegistry {
 
     fn save_registry(reg: &FontRegistryFile) -> Result<()> {
         let path = registry_path();
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let tmp = path.with_extension(format!("tmp_{}", std::process::id()));
         let file = std::fs::File::create(&tmp)?;
         serde_json::to_writer_pretty(file, reg)?;
@@ -167,7 +190,9 @@ impl AppConfig {
 
     pub fn save(&self) -> Result<()> {
         let path = config_path();
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let content = toml::to_string_pretty(self).context("Serialize config")?;
         std::fs::write(&path, content)?;
         Ok(())
@@ -185,6 +210,10 @@ impl AppConfig {
         cfg.save()
     }
 
-    pub fn get_latin() -> Option<String> { Self::load().default_latin }
-    pub fn get_cjk() -> Option<String> { Self::load().default_cjk }
+    pub fn get_latin() -> Option<String> {
+        Self::load().default_latin
+    }
+    pub fn get_cjk() -> Option<String> {
+        Self::load().default_cjk
+    }
 }

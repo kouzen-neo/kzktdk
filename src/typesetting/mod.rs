@@ -319,7 +319,14 @@ impl<'a> Typesetter<'a> {
         target_language: Option<&str>,
         force_text_color: Option<Rgb<u8>>,
     ) {
-        self.render_bubble_text_with_style(img, detection, text, target_language, force_text_color, None)
+        self.render_bubble_text_with_style(
+            img,
+            detection,
+            text,
+            target_language,
+            force_text_color,
+            None,
+        )
     }
 
     pub fn render_bubble_text_with_style(
@@ -349,7 +356,8 @@ impl<'a> Typesetter<'a> {
                 let spacing = (clamped * settings.spacing_ratio).round().max(1.0);
                 let scale = PxScale::from(clamped);
                 let max_w = box_w * settings.scale_w;
-                let lines = self.wrap_text_with_hyphenation(&display_text, scale, max_w, target_language);
+                let lines =
+                    self.wrap_text_with_hyphenation(&display_text, scale, max_w, target_language);
                 (clamped, spacing, lines)
             } else {
                 self.fit_text(&display_text, box_w, box_h, settings, target_language)
@@ -397,14 +405,23 @@ impl<'a> Typesetter<'a> {
             Rgb([18, 18, 18])
         };
         let text_color = if let Some(style) = bubble_style {
-            if let Some(c) = style.text_color { Rgb(c) } else { force_text_color.unwrap_or(auto_text_color) }
+            if let Some(c) = style.text_color {
+                Rgb(c)
+            } else {
+                force_text_color.unwrap_or(auto_text_color)
+            }
         } else {
             force_text_color.unwrap_or(auto_text_color)
         };
         // Stroke override
         let stroke_color = if let Some(style) = bubble_style {
-            if let Some(c) = style.stroke_color { Rgb(c) }
-            else if text_color == Rgb([255, 255, 255]) { Rgb([0, 0, 0]) } else { Rgb([255, 255, 255]) }
+            if let Some(c) = style.stroke_color {
+                Rgb(c)
+            } else if text_color == Rgb([255, 255, 255]) {
+                Rgb([0, 0, 0])
+            } else {
+                Rgb([255, 255, 255])
+            }
         } else if text_color == Rgb([255, 255, 255]) {
             Rgb([0, 0, 0])
         } else {

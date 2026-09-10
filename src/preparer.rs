@@ -1,5 +1,5 @@
-use image::{Rgb, RgbImage};
 use crate::ocr::{OcrEngine, TextRegion};
+use image::{Rgb, RgbImage};
 
 const MAX_DETECT_DIM: u32 = 2048;
 
@@ -91,7 +91,8 @@ pub fn detect_free_text(
     let (scaled, scaled_boxes): (RgbImage, Vec<[u32; 4]>) = if (scale - 1.0).abs() > f32::EPSILON {
         let nw = (w as f32 * scale).round() as u32;
         let nh = (h as f32 * scale).round() as u32;
-        let scaled_img = image::imageops::resize(&masked, nw, nh, image::imageops::FilterType::Triangle);
+        let scaled_img =
+            image::imageops::resize(&masked, nw, nh, image::imageops::FilterType::Triangle);
         (scaled_img, Vec::new())
     } else {
         (masked, Vec::new())

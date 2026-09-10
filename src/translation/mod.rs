@@ -349,7 +349,11 @@ impl Provider {
                 });
                 let res = client.post(&url).json(&body).send().await?;
                 if !res.status().is_success() {
-                    bail!("Gemini repair error: HTTP {} - {}", res.status(), res.text().await?);
+                    bail!(
+                        "Gemini repair error: HTTP {} - {}",
+                        res.status(),
+                        res.text().await?
+                    );
                 }
                 let json: serde_json::Value = res.json().await?;
                 Ok(json["candidates"][0]["content"]["parts"][0]["text"]
@@ -357,7 +361,11 @@ impl Provider {
                     .context("No text in Gemini repair response")?
                     .to_string())
             }
-            Provider::OpenAI { api_key, base_url, model } => {
+            Provider::OpenAI {
+                api_key,
+                base_url,
+                model,
+            } => {
                 let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
                 let body = serde_json::json!({
                     "model": model,
@@ -367,14 +375,29 @@ impl Provider {
                 });
                 let mut headers = HeaderMap::new();
                 if !api_key.is_empty() {
-                    headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", api_key))?);
+                    headers.insert(
+                        "Authorization",
+                        HeaderValue::from_str(&format!("Bearer {}", api_key))?,
+                    );
                 }
-                let res = client.post(&url).headers(headers).json(&body).send().await?;
+                let res = client
+                    .post(&url)
+                    .headers(headers)
+                    .json(&body)
+                    .send()
+                    .await?;
                 if !res.status().is_success() {
-                    bail!("OpenAI repair error: HTTP {} - {}", res.status(), res.text().await?);
+                    bail!(
+                        "OpenAI repair error: HTTP {} - {}",
+                        res.status(),
+                        res.text().await?
+                    );
                 }
                 let json: serde_json::Value = res.json().await?;
-                Ok(json["choices"][0]["message"]["content"].as_str().context("No content in OpenAI repair")?.to_string())
+                Ok(json["choices"][0]["message"]["content"]
+                    .as_str()
+                    .context("No content in OpenAI repair")?
+                    .to_string())
             }
             Provider::Claude { api_key, model } => {
                 let url = "https://api.anthropic.com/v1/messages";
@@ -388,10 +411,17 @@ impl Provider {
                 headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
                 let res = client.post(url).headers(headers).json(&body).send().await?;
                 if !res.status().is_success() {
-                    bail!("Claude repair error: HTTP {} - {}", res.status(), res.text().await?);
+                    bail!(
+                        "Claude repair error: HTTP {} - {}",
+                        res.status(),
+                        res.text().await?
+                    );
                 }
                 let json: serde_json::Value = res.json().await?;
-                Ok(json["content"][0]["text"].as_str().context("No text in Claude repair")?.to_string())
+                Ok(json["content"][0]["text"]
+                    .as_str()
+                    .context("No text in Claude repair")?
+                    .to_string())
             }
         }
     }
@@ -419,13 +449,19 @@ pub struct RateLimiter {
 
 impl Default for RateLimiter {
     fn default() -> Self {
-        Self { max_rps: 3, retry_max: 3 }
+        Self {
+            max_rps: 3,
+            retry_max: 3,
+        }
     }
 }
 
 impl RateLimiter {
     pub fn new(max_rps: u32) -> Self {
-        Self { max_rps: max_rps.max(1), retry_max: 3 }
+        Self {
+            max_rps: max_rps.max(1),
+            retry_max: 3,
+        }
     }
 
     pub async fn execute_with_retry<F, Fut>(&self, mut api_call: F) -> Result<String>
@@ -437,7 +473,12 @@ impl RateLimiter {
         for attempt in 0..=self.retry_max {
             if attempt > 0 {
                 let backoff = Duration::from_millis(1000 * (1 << (attempt - 1).min(3)));
-                println!("  [RateLimit] Retry {}/{} after {}ms", attempt, self.retry_max, backoff.as_millis());
+                println!(
+                    "  [RateLimit] Retry {}/{} after {}ms",
+                    attempt,
+                    self.retry_max,
+                    backoff.as_millis()
+                );
                 tokio::time::sleep(backoff).await;
             }
             // simple token bucket delay
@@ -448,7 +489,11 @@ impl RateLimiter {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     let msg = e.to_string();
-                    let is_retryable = msg.contains("429") || msg.contains("503") || msg.contains("502") || msg.contains("500") || msg.contains("rate");
+                    let is_retryable = msg.contains("429")
+                        || msg.contains("503")
+                        || msg.contains("502")
+                        || msg.contains("500")
+                        || msg.contains("rate");
                     if is_retryable && attempt < self.retry_max {
                         last_err = Some(e);
                         continue;
@@ -470,7 +515,11 @@ pub async fn translate_with_chain(
     rate_limiter: &RateLimiter,
 ) -> Result<HashMap<String, String>> {
     for prov in chain.all_providers() {
-        println!("  Translating with {} ({})...", prov.name(), prov.model_name());
+        println!(
+            "  Translating with {} ({})...",
+            prov.name(),
+            prov.model_name()
+        );
         let raw_result = rate_limiter
             .execute_with_retry(|| prov.translate_mosaic_raw(mosaic, prompt))
             .await;
@@ -480,8 +529,14 @@ pub async fn translate_with_chain(
                     Ok(map) if !map.is_empty() => return Ok(map),
                     _ => {
                         // Try repair
-                        println!("  [!] {} returned unparseable output (raw: {}). Trying repair...", prov.name(), raw.chars().take(80).collect::<String>());
-                        if let Some(repaired) = repair_json_output(prov, &raw, target_lang, rate_limiter).await {
+                        println!(
+                            "  [!] {} returned unparseable output (raw: {}). Trying repair...",
+                            prov.name(),
+                            raw.chars().take(80).collect::<String>()
+                        );
+                        if let Some(repaired) =
+                            repair_json_output(prov, &raw, target_lang, rate_limiter).await
+                        {
                             if let Ok(map) = parse_translation_json(&repaired) {
                                 if !map.is_empty() {
                                     println!("  [Repair] {} repair succeeded", prov.name());
@@ -489,13 +544,20 @@ pub async fn translate_with_chain(
                                 }
                             }
                         }
-                        println!("  [Failover] {} failed (unparseable). Trying next provider...", prov.name());
+                        println!(
+                            "  [Failover] {} failed (unparseable). Trying next provider...",
+                            prov.name()
+                        );
                         continue;
                     }
                 }
             }
             Err(e) => {
-                println!("  [Failover] {} failed ({}). Trying fallback...", prov.name(), e);
+                println!(
+                    "  [Failover] {} failed ({}). Trying fallback...",
+                    prov.name(),
+                    e
+                );
                 continue;
             }
         }

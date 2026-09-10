@@ -14,6 +14,26 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.1.1-dev.14] - 2026-09-10
+
+Branch: `dev-kz-debug`
+
+### Added
+- **P0 machine-readable backend (GUI)**:
+  - `metadata show/validate --format text|json [--quiet]`, `font list/get-default --format text|json [--quiet]` — JSON ke stdout, log ke stderr; `validate --format json` exit 2 saat invalid (`ValidationReport{valid,kind,errors,meta}`).
+  - `metadata preview --to-stdout --thumb 512` — PNG base64 satu baris ke stdout (tanpa disk), log ke stderr, downscale longest-side.
+  - `metadata render --progress text|jsonl` — JSONL per halaman + `{"done":true}` ke stderr (single & batch).
+- **P1 editor facade**:
+  - `src/editor.rs` baru: `EditPatch` (semua flag edit + `order` + `mask_path`), `apply_patch()` (lenient & strict), `EditorSession::{new,load_page,render_page,preview_bubble}`, `thumbnail()`, `bubbles_hash()`.
+  - `metadata edit --stdin-patch` — patch JSON transaksional dari stdin, abort tanpa tulis + exit 2 saat ada error.
+  - File-lock sibling `.lock` (`create_new` + retry 50x10ms) di `atomic_write_json` — aman GUI-vs-CLI konkuren (ada test).
+  - `metadata render` single/batch + `preview` kini memakai `EditorSession` (hapus ~120 baris duplikasi).
+- **P2 watch & schema**:
+  - `metadata watch --project --images -o [--interval 1] [--once]` — poll incremental, render ulang hanya halaman dirty (hash `bubbles`), JSONL ke stderr.
+  - Skema: `Bubble.mask_path?`, `PageEditData.order?` (+ `ordered_bubbles()`, `validate_page()` cek `unknown_order_id`), `metadata edit --order "1,ft1,2" --mask-path "ID=path"`.
+
+---
+
 ## [0.1.1-dev.13] - 2026-09-10
 
 Commit: `f2a4ca3` — `feat: freetext outside bubbles + rapid ort real (vision/ft, auto-download, Indo proof)`
