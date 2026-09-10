@@ -14,6 +14,28 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.1.1-dev.13] - 2026-09-10
+
+Commit: `a8352ed` — `feat: freetext outside bubbles + rapid ort real (vision/ft, auto-download, Indo proof)`
+
+Branch: `dev-kz-debug`
+
+### Added
+- **Freetext Outside Bubbles (kzkt parity)**:
+  - `src/preparer.rs` `detect_free_text()` `WHITE` mask `scale 2048` `canvas.drawRect` bubble → `OcrEngine.recognize_regions` filter `w<12||h<8` `len==1 alnum` `center insideBubble` `IoU>=0.3` `mergeNearby gap20` `freetext_pad 6%` `bg median`.
+  - `src/ocr.rs` `TextRegion{bbox,text}` `OcrScript Japanese/English/Korean/Chinese/Auto` `trait OcrEngine {recognize, recognize_regions}` `NoopOcr` `RapidOcr {det_path,rec_path,dict_path}` `MangaOcr` `TesseractOcr {jpn_vert+jpn psm6 tsv conf>=30}` `create_ocr_engine()` `cache_dir_for ~/.cache/kzktdk/models/<engine>/` `ensure_rapid_cached()` auto-download `curl -L` `ch_PP-OCRv3_det_infer.onnx 2.4M + japan_rec_crnn.onnx 3.5M + japan_dict.txt 17K` `SWHL/RapidOCR` `~/.cache/kzktdk/models/rapid 5.8M` `ort 2.0.0-rc.13` `Session::builder().commit_from_file` letterbox `640` threshold `0.3` BFS boxes real `ft1 [374,277,616,378]` bukan dummy `[20,20]`.
+  - CLI `translate/detect --ocr none|rapid|manga|tesseract|vision --translate-free-text --ocr-script jp --mode vision|ocr|auto --ocr-model <path>` `TranslationContext` `combined_dets ft1..` `crops` padded `raw_map` `vision mosaic` vs `ocr JSON` vs `auto` fallback `norm_map` lowercase `ft` `inpaint_targets combined` `Typesetter render_bubble_text_with_style` `metadata PageEditData ocr_engine ft conf0.90`.
+  - `src/translation/mod.rs` prompt `RED ID numeric atau ft1/ft2 include ALL IDs even if SKIP` agar LLM tidak skip freetext.
+
+### Fixed
+- **Rapid Dummy → Real**: `RapidOcr` sebelumnya dummy `[20,20] テスト` `SKIP` sekarang `ort det` real `Sonico page01 ft1 [374,277,616,378] → Band beranggotakan tiga wanita...` `91%` pixel beda `ft1_render_proof` Indo proof `sonico01_indo.jpg`.
+- **FT Uppercase**: `norm_map` lowercase `FT1→ft1` sebelum inpaint/typeset agar `all_translations` tidak miss.
+
+### Changed
+- `translate_page` `detect` single+batch `make_page_with_ft` `draw_rect green` `batch json` `project.kedit.json`.
+
+---
+
 ## [0.1.1-dev.12] - 2026-09-10
 
 Commit: `f9af774` — `feat: ocr prep — raw_text, bold/italic, batch style, backup`

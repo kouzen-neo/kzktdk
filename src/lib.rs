@@ -5,5 +5,6 @@ pub mod inpaint;
 pub mod metadata;
 pub mod model;
 pub mod ocr;
+pub mod preparer;
 pub mod translation;
 pub mod typesetting;

@@ -98,6 +98,18 @@ enum Commands {
         /// Jobs for batch parallel: auto or number
         #[arg(long, default_value = "auto")]
         jobs: String,
+        /// Also detect freetext outside bubbles (requires --ocr)
+        #[arg(long, default_value_t = false)]
+        translate_free_text: bool,
+        /// OCR script for freetext: auto|jp|en|kr|cn
+        #[arg(long, default_value = "jp")]
+        ocr_script: String,
+        /// OCR engine for freetext: none|rapid|manga|tesseract
+        #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "rapid", "manga", "tesseract", "vision", "local"]))]
+        ocr: String,
+        /// Custom OCR model path override
+        #[arg(long)]
+        ocr_model: Option<PathBuf>,
     },
 
     /// Inpaint/erase original text inside dialogue bubbles
@@ -194,9 +206,21 @@ Examples:
         /// Custom metadata directory (default: same as output)
         #[arg(long)]
         metadata_dir: Option<PathBuf>,
-        /// OCR engine: none (default), vision, local — stub for future
-        #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "vision", "local"]))]
+        /// OCR engine: none (default), rapid, manga, tesseract — pluggable
+        #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "rapid", "manga", "tesseract", "vision", "local"]))]
         ocr: String,
+        /// Translate freetext outside bubbles (requires --ocr rapid|manga|tesseract)
+        #[arg(long, default_value_t = false)]
+        translate_free_text: bool,
+        /// OCR script: auto|jp|en|kr|cn (default jp = JAPANESE+Latin)
+        #[arg(long, default_value = "jp")]
+        ocr_script: String,
+        /// Translation mode: vision (mosaic), ocr (text-only), auto (ocr fallback vision)
+        #[arg(long, default_value = "vision", value_parser = clap::builder::PossibleValuesParser::new(["vision", "ocr", "auto"]))]
+        mode: String,
+        /// Custom OCR model path override (else auto-download ~/.cache/kzktdk/models/<engine>/)
+        #[arg(long)]
+        ocr_model: Option<PathBuf>,
     },
 
     /// Metadata operations for editor backend
@@ -575,6 +599,10 @@ async fn main() -> Result<()> {
             model,
             json,
             jobs,
+            translate_free_text,
+            ocr_script,
+            ocr,
+            ocr_model,
         } => {
             let model_file = ensure_model(&model)?;
             println!("[1/2] Loading model from {:?}...", model_file);
@@ -596,23 +624,47 @@ async fn main() -> Result<()> {
                     println!("[2/2] Detecting bubbles on {:?}...", img_path);
                     let img = image::open(&img_path).with_context(|| format!("Failed to open {:?}", img_path))?;
                     let (w, h) = (img.width(), img.height());
-                    let detections = yolo.detect_bubbles(&img)?;
+                    let mut detections = yolo.detect_bubbles(&img)?;
                     println!("Found {} speech bubbles.", detections.len());
+                    // freetext
+                    let mut ft_boxes: Vec<[u32;4]> = Vec::new();
+                    if translate_free_text {
+                        if ocr == "none" {
+                            eprintln!("[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only");
+                        } else {
+                            let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
+                            let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                            if engine.name() != "none" {
+                                let bubble_boxes: Vec<[u32;4]> = detections.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
+                                ft_boxes = kzktdk::preparer::detect_free_text(&img.to_rgb8(), &bubble_boxes, engine.as_ref());
+                                println!("Found {} freetext regions.", ft_boxes.len());
+                            }
+                        }
+                    }
                     let mut rgb_img = img.to_rgb8();
                     for (idx, det) in detections.iter().enumerate() {
                         println!("  Bubble #{}: [{}, {}, {}, {}] (conf: {:.2})", idx+1, det.x1, det.y1, det.x2, det.y2, det.conf);
                         draw_rect(&mut rgb_img, det.x1, det.y1, det.x2, det.y2, Rgb([255,0,0]), 2);
                     }
+                    for (idx, fb) in ft_boxes.iter().enumerate() {
+                        println!("  Freetext #{}: [{},{},{},{}]", idx+1, fb[0],fb[1],fb[2],fb[3]);
+                        draw_rect(&mut rgb_img, fb[0],fb[1],fb[2],fb[3], Rgb([0,200,0]), 2);
+                    }
                     rgb_img.save(&out_path)?;
                     println!("Saved detection preview to {:?}", out_path);
                     if let Some(json_path) = json {
-                        let data = metadata::PageEditData::new(
+                        let mut bubbles: Vec<metadata::Bubble> = detections.iter().enumerate().map(|(i,d)| metadata::Bubble {
+                            id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None
+                        }).collect();
+                        for (i, fb) in ft_boxes.iter().enumerate() {
+                            bubbles.push(metadata::Bubble { id: format!("ft{}", i+1), bbox: *fb, conf: 0.90, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None });
+                        }
+                        let mut data = metadata::PageEditData::new(
                             img_path.file_name().unwrap().to_string_lossy().to_string(),
                             w, h, "English".to_string(), "classic".to_string(),
-                            detections.iter().enumerate().map(|(i,d)| metadata::Bubble {
-                                id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None
-                            }).collect()
+                            bubbles
                         );
+                        if ocr != "none" { data.ocr_engine = Some(ocr.clone()); }
                         metadata::save_page_metadata(&json_path, &data)?;
                         println!("Saved JSON to {:?}", json_path);
                     }
@@ -622,21 +674,47 @@ async fn main() -> Result<()> {
                     std::fs::create_dir_all(&out_dir)?;
                     println!("[2/2] Detecting bubbles on {} pages (jobs={})...", images.len(), jobs_num);
                     let mut all_pages = Vec::new();
+                    let make_page_with_ft = |p: &PathBuf, dets: Vec<kzktdk::model::yolo::Detection>, w: u32, h: u32, rgb_ref: &RgbImage| -> metadata::PageEditData {
+                        let mut ft_boxes: Vec<[u32;4]> = Vec::new();
+                        if translate_free_text && ocr != "none" {
+                            let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
+                            let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                            if engine.name() != "none" {
+                                let bboxes: Vec<[u32;4]> = dets.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
+                                ft_boxes = kzktdk::preparer::detect_free_text(rgb_ref, &bboxes, engine.as_ref());
+                            }
+                        }
+                        let mut bubbles: Vec<metadata::Bubble> = dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect();
+                        for (i, fb) in ft_boxes.iter().enumerate() {
+                            bubbles.push(metadata::Bubble { id: format!("ft{}", i+1), bbox: *fb, conf: 0.90, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None });
+                        }
+                        let mut data = metadata::PageEditData::new(p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(), bubbles);
+                        if ocr != "none" { data.ocr_engine = Some(ocr.clone()); }
+                        data
+                    };
                     if jobs_num <= 1 {
                         for (idx, p) in images.iter().enumerate() {
                             let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
                             let (w,h) = (img.width(), img.height());
                             let dets = yolo.detect_bubbles(&img)?;
                             println!("[Page {}/{}] {:?}: {} bubbles", idx+1, images.len(), p.file_name().unwrap(), dets.len());
-                            let mut rgb = img.to_rgb8();
-                            for d in &dets { draw_rect(&mut rgb, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            let rgb = img.to_rgb8();
+                            let mut rgb_out = rgb.clone();
+                            for d in &dets { draw_rect(&mut rgb_out, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            // also draw ft
+                            if translate_free_text && ocr != "none" {
+                                let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
+                                let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                                if engine.name() != "none" {
+                                    let bboxes: Vec<[u32;4]> = dets.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
+                                    let fts = kzktdk::preparer::detect_free_text(&rgb, &bboxes, engine.as_ref());
+                                    for fb in &fts { draw_rect(&mut rgb_out, fb[0],fb[1],fb[2],fb[3], Rgb([0,200,0]), 2); }
+                                }
+                            }
                             let out = out_dir.join(p.file_name().unwrap());
-                            rgb.save(&out)?;
+                            rgb_out.save(&out)?;
                             if json.is_some() {
-                                all_pages.push(metadata::PageEditData::new(
-                                    p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
-                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect()
-                                ));
+                                all_pages.push(make_page_with_ft(p, dets, w, h, &rgb));
                             }
                         }
                     } else {
@@ -646,15 +724,22 @@ async fn main() -> Result<()> {
                             let (w,h) = (img.width(), img.height());
                             let dets = yolo.detect_bubbles(&img)?;
                             println!("[Page {}/{}] {:?}: {} bubbles", idx+1, images.len(), p.file_name().unwrap(), dets.len());
-                            let mut rgb = img.to_rgb8();
-                            for d in &dets { draw_rect(&mut rgb, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            let rgb = img.to_rgb8();
+                            let mut rgb_out = rgb.clone();
+                            for d in &dets { draw_rect(&mut rgb_out, d.x1, d.y1, d.x2, d.y2, Rgb([255,0,0]), 2); }
+                            if translate_free_text && ocr != "none" {
+                                let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
+                                let engine = kzktdk::ocr::create_ocr_engine(&ocr, ocr_model.as_deref(), script);
+                                if engine.name() != "none" {
+                                    let bboxes: Vec<[u32;4]> = dets.iter().map(|d| [d.x1,d.y1,d.x2,d.y2]).collect();
+                                    let fts = kzktdk::preparer::detect_free_text(&rgb, &bboxes, engine.as_ref());
+                                    for fb in &fts { draw_rect(&mut rgb_out, fb[0],fb[1],fb[2],fb[3], Rgb([0,200,0]), 2); }
+                                }
+                            }
                             let out = out_dir.join(p.file_name().unwrap());
-                            rgb.save(&out)?;
+                            rgb_out.save(&out)?;
                             if json.is_some() {
-                                all_pages.push(metadata::PageEditData::new(
-                                    p.file_name().unwrap().to_string_lossy().to_string(), w, h, "English".to_string(), "classic".to_string(),
-                                    dets.iter().enumerate().map(|(i,d)| metadata::Bubble { id: (i+1).to_string(), bbox: [d.x1,d.y1,d.x2,d.y2], conf: d.conf, translated: String::new(), bg_color: None, style: None, edited: false, raw_text: None }).collect()
-                                ));
+                                all_pages.push(make_page_with_ft(p, dets, w, h, &rgb));
                             }
                         }
                     }
@@ -717,6 +802,10 @@ async fn main() -> Result<()> {
             save_metadata,
             metadata_dir,
             ocr,
+            translate_free_text,
+            ocr_script,
+            mode,
+            ocr_model,
         } => {
             if clear_cache {
                 let cache = TranslationCache::open()?;
@@ -724,8 +813,17 @@ async fn main() -> Result<()> {
                 println!("[Cache] Cleared translation cache");
                 return Ok(());
             }
-            if ocr != "none" {
-                eprintln!("[OCR] engine '{}' belum diimplementasikan, fallback none (raw_text stays None)", ocr);
+            // Validate mode/ocr_script early
+            let ocr_script_enum = kzktdk::ocr::OcrScript::from_key(&ocr_script);
+            let _ = mode.clone();
+            let _ = ocr_script_enum;
+            let _ = ocr_model.clone();
+            if translate_free_text && ocr == "none" {
+                eprintln!("[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only");
+            }
+            // Legacy info for mode
+            if mode != "vision" && mode != "ocr" && mode != "auto" {
+                eprintln!("[mode] unknown '{}', fallback vision", mode);
             }
             let input = input.context("Missing <INPUT> path (required unless --clear-cache)")?;
 
@@ -884,6 +982,11 @@ async fn main() -> Result<()> {
                         cache: cache_opt.as_deref(),
                         save_metadata,
                         metadata_dir: metadata_dir.clone(),
+                        translate_free_text: translate_free_text.clone(),
+                        ocr: ocr.clone(),
+                        ocr_script: ocr_script.clone(),
+                        mode: mode.clone(),
+                        ocr_model: ocr_model.clone(),
                     };
                     translate_page(&img_path, &out_path, &mut yolo, &ctx).await?;
 
@@ -953,6 +1056,11 @@ async fn main() -> Result<()> {
                             cache: cache_opt.as_deref(),
                             save_metadata,
                             metadata_dir: metadata_dir.clone(),
+                            translate_free_text: translate_free_text.clone(),
+                            ocr: ocr.clone(),
+                            ocr_script: ocr_script.clone(),
+                            mode: mode.clone(),
+                            ocr_model: ocr_model.clone(),
                         };
                         for (idx, file_path) in images.iter().enumerate() {
                             let file_name = file_path.file_name().unwrap();
@@ -1032,6 +1140,11 @@ async fn main() -> Result<()> {
                         let use_cache_flag = cache_opt.is_some();
                         let save_meta_flag = save_metadata;
                         let meta_dir_opt = metadata_dir.clone();
+                        let translate_free_text_c = translate_free_text.clone();
+                        let ocr_c = ocr.clone();
+                        let ocr_script_c = ocr_script.clone();
+                        let mode_c = mode.clone();
+                        let ocr_model_c = ocr_model.clone();
 
                         for (idx, file_path) in images.iter().enumerate() {
                             let sem = semaphore.clone();
@@ -1055,6 +1168,11 @@ async fn main() -> Result<()> {
                             let fallback_str_c = fallback_str_c.clone();
                             let save_meta_flag = save_meta_flag;
                             let meta_dir_opt = meta_dir_opt.clone();
+                            let translate_free_text_c2 = translate_free_text_c.clone();
+                            let ocr_c2 = ocr_c.clone();
+                            let ocr_script_c2 = ocr_script_c.clone();
+                            let mode_c2 = mode_c.clone();
+                            let ocr_model_c2 = ocr_model_c.clone();
                             join_set.spawn(async move {
                                 let _permit = sem.acquire_owned().await.unwrap();
                                 // Rebuild chain per task (cheap)
@@ -1100,6 +1218,11 @@ async fn main() -> Result<()> {
                                     cache: cache_local.as_ref(),
                                     save_metadata: save_meta_flag,
                                     metadata_dir: meta_dir_opt.clone(),
+                                    translate_free_text: translate_free_text_c2,
+                                    ocr: ocr_c2,
+                                    ocr_script: ocr_script_c2,
+                                    mode: mode_c2,
+                                    ocr_model: ocr_model_c2,
                                 };
                                 let res = translate_page(&file_path, &target_path, &mut yolo, &ctx).await;
                                 let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1645,6 +1768,11 @@ struct TranslationContext<'a> {
     cache: Option<&'a TranslationCache>,
     save_metadata: bool,
     metadata_dir: Option<PathBuf>,
+    translate_free_text: bool,
+    ocr: String,
+    ocr_script: String,
+    mode: String,
+    ocr_model: Option<PathBuf>,
 }
 
 async fn translate_page(
@@ -1655,134 +1783,272 @@ async fn translate_page(
 ) -> Result<()> {
     let img =
         image::open(input_path).with_context(|| format!("Failed to open {:?}", input_path))?;
-    let detections = yolo.detect_bubbles(&img)?;
+    let mut detections = yolo.detect_bubbles(&img)?;
 
-    if detections.is_empty() {
+    if detections.is_empty() && !ctx.translate_free_text {
         println!("    [Page] No dialogue bubbles detected. Copying original.");
         img.save(output_path)?;
         return Ok(());
     }
-
     println!("    [Page] Found {} bubbles.", detections.len());
     let orig_rgb = img.to_rgb8();
-    let mut crops = Vec::new();
+    let (w_img, h_img) = img.dimensions();
+
+    // --- Freetext detection ---
+    let mut ft_boxes: Vec<[u32; 4]> = Vec::new();
+    if ctx.translate_free_text {
+        if ctx.ocr == "none" {
+            eprintln!("[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only");
+        } else {
+            let script = kzktdk::ocr::OcrScript::from_key(&ctx.ocr_script);
+            let engine = kzktdk::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), script);
+            if engine.name() == "none" {
+                eprintln!("[freetext] engine none, skip freetext");
+            } else {
+                let bubble_boxes: Vec<[u32; 4]> = detections.iter().map(|d| [d.x1, d.y1, d.x2, d.y2]).collect();
+                let detected = kzktdk::preparer::detect_free_text(&orig_rgb, &bubble_boxes, engine.as_ref());
+                if detected.is_empty() {
+                    println!("    [Freetext] 0 regions");
+                } else {
+                    println!("    [Freetext] {} regions: {:?}", detected.len(), detected);
+                    ft_boxes = detected;
+                }
+            }
+        }
+    }
+
+    // Build combined detections for rendering/inpaint: bubbles + freetext
+    let mut combined_dets: Vec<kzktdk::model::yolo::Detection> = detections.clone();
+    let mut ft_ids: Vec<String> = Vec::new();
+    for (idx, fb) in ft_boxes.iter().enumerate() {
+        let fid = format!("ft{}", idx + 1);
+        ft_ids.push(fid);
+        combined_dets.push(kzktdk::model::yolo::Detection { x1: fb[0], y1: fb[1], x2: fb[2], y2: fb[3], conf: 0.90 });
+    }
+    if detections.is_empty() && combined_dets.is_empty() {
+        println!("    [Page] No bubbles nor freetext, copying original.");
+        img.save(output_path)?;
+        return Ok(());
+    }
+
+    // Build crops: bubbles + ft
+    let mut crops: Vec<CropItem> = Vec::new();
     for (i, det) in detections.iter().enumerate() {
         let w = det.width();
         let h = det.height();
-        println!(
-            "      Bubble #{}: [{}, {}, {}, {}] ({}x{})",
-            i + 1,
-            det.x1,
-            det.y1,
-            det.x2,
-            det.y2,
-            w,
-            h
-        );
+        if w == 0 || h == 0 { continue; }
+        println!("      Bubble #{}: [{}, {}, {}, {}] ({}x{})", i+1, det.x1, det.y1, det.x2, det.y2, w, h);
         let mut crop = RgbImage::new(w, h);
-        for cy in 0..h {
-            for cx in 0..w {
-                crop.put_pixel(cx, cy, *orig_rgb.get_pixel(det.x1 + cx, det.y1 + cy));
-            }
-        }
-        crops.push(CropItem {
-            id: (i + 1).to_string(),
-            image: crop,
-        });
+        for cy in 0..h { for cx in 0..w { crop.put_pixel(cx, cy, *orig_rgb.get_pixel(det.x1+cx, det.y1+cy)); } }
+        crops.push(CropItem { id: (i+1).to_string(), image: crop });
+    }
+    for (i, fb) in ft_boxes.iter().enumerate() {
+        let pad = kzktdk::preparer::freetext_pad(*fb, w_img, h_img);
+        let w = (pad[2]-pad[0]).max(1);
+        let h = (pad[3]-pad[1]).max(1);
+        println!("      Freetext #{}: {:?} padded {:?} ({}x{})", i+1, fb, pad, w, h);
+        let mut crop = RgbImage::new(w, h);
+        for cy in 0..h { for cx in 0..w { crop.put_pixel(cx, cy, *orig_rgb.get_pixel(pad[0]+cx, pad[1]+cy)); } }
+        crops.push(CropItem { id: format!("ft{}", i+1), image: crop });
     }
 
-    // Cache filter
-    let mut all_translations = std::collections::HashMap::new();
+    // --- OCR raw_text gathering (for metadata) ---
+    let mut raw_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if ctx.ocr != "none" {
+        let script = kzktdk::ocr::OcrScript::from_key(&ctx.ocr_script);
+        let engine = kzktdk::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), script);
+        if engine.name() != "none" {
+            // recognize per crop (bubble + ft)
+            for c in &crops {
+                // find bbox for this id
+                let bbox_opt = if c.id.starts_with("ft") {
+                    ft_boxes.get(c.id[2..].parse::<usize>().unwrap_or(1)-1).copied()
+                } else {
+                    c.id.parse::<usize>().ok().and_then(|idx| detections.get(idx-1)).map(|d| [d.x1,d.y1,d.x2,d.y2])
+                };
+                if let Some(bbox) = bbox_opt {
+                    if let Some(txt) = engine.recognize(&orig_rgb, bbox) {
+                        if !txt.trim().is_empty() { raw_map.insert(c.id.clone(), txt); }
+                    }
+                }
+            }
+            if !raw_map.is_empty() { println!("    [OCR] raw_text {} entries", raw_map.len()); }
+        }
+    }
+
+    // --- Translation branching ---
+    let mut all_translations: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Cache filter first
     let crops_to_translate: Vec<CropItem>;
     if let Some(cache) = ctx.cache {
-        // Use primary provider identity for cache key
         let prov_name = ctx.chain.primary.name();
         let model_name = ctx.chain.primary.model_name();
         let (cached, to_trans) = cache.filter_cached(&crops, ctx.target_lang, prov_name, model_name, ctx.prompt_sig);
-        if !cached.is_empty() {
-            println!("      [Cache Hit] {}/{} bubbles from cache", cached.len(), crops.len());
-        }
+        if !cached.is_empty() { println!("      [Cache Hit] {}/{} from cache", cached.len(), crops.len()); }
         all_translations.extend(cached);
         crops_to_translate = to_trans;
     } else {
         crops_to_translate = crops.clone();
     }
 
+    // Normalize ft ids to lowercase (LLM may return FT1)
+    fn norm_map(mut m: std::collections::HashMap<String,String>) -> std::collections::HashMap<String,String> {
+        let mut out = std::collections::HashMap::new();
+        for (k,v) in m.drain() {
+            let nk = if k.to_lowercase().starts_with("ft") { k.to_lowercase() } else { k };
+            out.insert(nk, v);
+        }
+        out
+    }
+    // Helper for text-only translation
+    async fn translate_ocr_json(chain: &ProviderChain, limiter: &RateLimiter, json_input: &str, prompt: &str, target_lang: &str) -> Result<std::collections::HashMap<String,String>> {
+        let full_prompt = format!("{}\n\nInput JSON (id -> raw Japanese text):\n{}\n\nTranslate each value to {} and return JSON mapping id->translation.", prompt, json_input, target_lang);
+        for prov in chain.all_providers() {
+            println!("  Translating OCR JSON with {} ({})...", prov.name(), prov.model_name());
+            let raw_res = limiter.execute_with_retry(|| prov.translate_text(json_input, &full_prompt)).await;
+            match raw_res {
+                Ok(raw) => {
+                    if let Ok(map) = kzktdk::translation::parse_translation_json(&raw) {
+                        if !map.is_empty() { return Ok(norm_map(map)); }
+                    }
+                    println!("  [Failover] {} unparseable OCR json", prov.name());
+                }
+                Err(e) => { println!("  [Failover] {} failed ocr json: {}", prov.name(), e); }
+            }
+        }
+        bail!("All providers failed OCR JSON translation")
+    }
+
     if crops_to_translate.is_empty() {
-        println!("      All bubbles served from cache");
+        println!("      All served from cache");
     } else {
-        // Chunk into batches for LLM translation with fallback+retry+repair
-        for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
-            let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
-            let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
-            // Save to cache
-            if let Some(cache) = ctx.cache {
-                let prov_name = ctx.chain.primary.name();
-                let model_name = ctx.chain.primary.model_name();
-                cache.save_batch(&chunk_trans, chunk, ctx.target_lang, prov_name, model_name, ctx.prompt_sig);
-            }
-            all_translations.extend(chunk_trans);
+        let use_ocr_path = ctx.mode == "ocr" || ctx.mode == "auto";
+        let ocr_available = !raw_map.is_empty() || ctx.ocr != "none";
+        if ctx.mode == "ocr" && !ocr_available {
+            eprintln!("[mode ocr] no OCR results, fallback vision");
         }
-    }
-
-    for (k, v) in &all_translations {
-        println!("      #{} -> \"{}\"", k, v);
-    }
-
-    let mut page = orig_rgb.clone();
-    let inpaint_targets: Vec<kzktdk::model::yolo::Detection> = detections
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| {
-            let id = (i + 1).to_string();
-            if let Some(trans) = all_translations.get(&id) {
-                trans.to_uppercase() != "SKIP" && !trans.trim().is_empty()
+        if use_ocr_path && ctx.mode == "ocr" && ocr_available {
+            // try OCR text-only
+            // Build json for to_translate subset filtered by raw_map
+            let mut ocr_json_map = serde_json::Map::new();
+            for c in &crops_to_translate {
+                if let Some(raw) = raw_map.get(&c.id) { ocr_json_map.insert(c.id.clone(), serde_json::Value::String(raw.clone())); }
+            }
+            if ocr_json_map.is_empty() {
+                // fallback vision if no raw
+                for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
+                    let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
+                    let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
+                    if let Some(cache) = ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                    all_translations.extend(chunk_trans);
+                }
             } else {
-                false
+                let json_str = serde_json::Value::Object(ocr_json_map).to_string();
+                match translate_ocr_json(ctx.chain, ctx.rate_limiter, &json_str, ctx.prompt, ctx.target_lang).await {
+                    Ok(map) => {
+                        if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&map, &crops_to_translate, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                        all_translations.extend(map);
+                    }
+                    Err(e) => {
+                        eprintln!("[OCR] text translation failed: {}, fallback vision", e);
+                        for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
+                            let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
+                            let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
+                            if let Some(cache) = ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                            all_translations.extend(chunk_trans);
+                        }
+                    }
+                }
             }
-        })
-        .map(|(_, d)| d.clone())
-        .collect();
-
-    if !inpaint_targets.is_empty() {
-        inpaint_image(&mut page, &inpaint_targets)?;
-    }
-
-    let typesetter = Typesetter::new(ctx.font_bytes, ctx.cjk_font_bytes)?;
-    for (i, det) in detections.iter().enumerate() {
-        let id = (i + 1).to_string();
-        if let Some(text) = all_translations.get(&id) {
-            if text.to_uppercase() == "SKIP" || text.trim().is_empty() {
-                continue;
+        } else if ctx.mode == "auto" && ocr_available && !raw_map.is_empty() {
+            // auto: try ocr first, fallback vision on failure
+            let mut ocr_json_map = serde_json::Map::new();
+            for c in &crops_to_translate { if let Some(raw)=raw_map.get(&c.id) { ocr_json_map.insert(c.id.clone(), serde_json::Value::String(raw.clone())); } }
+            if ocr_json_map.is_empty() {
+                for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
+                    let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
+                    let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
+                    if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                    all_translations.extend(chunk_trans);
+                }
+            } else {
+                let json_str = serde_json::Value::Object(ocr_json_map).to_string();
+                match translate_ocr_json(ctx.chain, ctx.rate_limiter, &json_str, ctx.prompt, ctx.target_lang).await {
+                    Ok(map) => {
+                        if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&map, &crops_to_translate, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                        all_translations.extend(map);
+                        // fill missing ids via vision
+                        let missing: Vec<CropItem> = crops_to_translate.iter().filter(|c| !all_translations.contains_key(&c.id)).cloned().collect();
+                        if !missing.is_empty() {
+                            for chunk in missing.chunks(ctx.batch_size.max(1)) {
+                                let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
+                                let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
+                                all_translations.extend(chunk_trans);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
+                            let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
+                            let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
+                            if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                            all_translations.extend(chunk_trans);
+                        }
+                    }
+                }
             }
-            // Use with_style variant (style=None for translate pipeline) for consistency with metadata render
-            typesetter.render_bubble_text_with_style(
-                &mut page,
-                det,
-                text,
-                Some(ctx.target_lang),
-                None,
-                None,
-            );
+        } else {
+            // vision
+            for chunk in crops_to_translate.chunks(ctx.batch_size.max(1)) {
+                let mosaic = MosaicBuilder::build_mosaic(chunk, ctx.font_bytes)?;
+                let chunk_trans = translate_with_chain(ctx.chain, &mosaic, ctx.prompt, ctx.target_lang, ctx.rate_limiter).await?;
+                if let Some(cache)=ctx.cache { let pn=ctx.chain.primary.name(); let mn=ctx.chain.primary.model_name(); cache.save_batch(&chunk_trans, chunk, ctx.target_lang, pn, mn, ctx.prompt_sig); }
+                all_translations.extend(chunk_trans);
+            }
         }
     }
 
+    // normalize ft keys to lowercase
+    all_translations = norm_map(all_translations);
+    for (k,v) in &all_translations { println!("      #{} -> \"{}\"", k, v); }
+
+    // Inpaint + typeset for combined (bubbles + ft)
+    let mut page = orig_rgb.clone();
+    let inpaint_targets: Vec<kzktdk::model::yolo::Detection> = combined_dets.iter().enumerate().filter(|(i,_)| {
+        let id = if *i < detections.len() { (i+1).to_string() } else { format!("ft{}", i - detections.len() +1) };
+        if let Some(t)=all_translations.get(&id) { t.to_uppercase()!="SKIP" && !t.trim().is_empty() } else { false }
+    }).map(|(_,d)| d.clone()).collect();
+    if !inpaint_targets.is_empty() { inpaint_image(&mut page, &inpaint_targets)?; }
+    let typesetter = Typesetter::new(ctx.font_bytes, ctx.cjk_font_bytes)?;
+    for (idx, det) in combined_dets.iter().enumerate() {
+        let id = if idx < detections.len() { (idx+1).to_string() } else { format!("ft{}", idx - detections.len() +1) };
+        if let Some(text)=all_translations.get(&id) {
+            if text.to_uppercase()=="SKIP" || text.trim().is_empty() { continue; }
+            typesetter.render_bubble_text_with_style(&mut page, det, text, Some(ctx.target_lang), None, None);
+        }
+    }
     page.save(output_path)?;
 
-    // Save metadata sidecar if requested
     if ctx.save_metadata {
-        let (w, h) = img.dimensions();
         let page_name = input_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let mut bg_map = std::collections::HashMap::new();
-        // sample bg color not critical, leave empty; editor will compute if needed
-        let data = metadata::build_page_data(&page_name, w, h, ctx.target_lang, ctx.prompt_sig, &detections, &all_translations, &bg_map);
+        let mut bubbles: Vec<metadata::Bubble> = Vec::new();
+        for (i, det) in detections.iter().enumerate() {
+            let id = (i+1).to_string();
+            bubbles.push(metadata::Bubble { id: id.clone(), bbox: [det.x1,det.y1,det.x2,det.y2], conf: det.conf, translated: all_translations.get(&id).cloned().unwrap_or_default(), bg_color: None, style: None, edited: false, raw_text: raw_map.get(&id).cloned() });
+        }
+        for (i, fb) in ft_boxes.iter().enumerate() {
+            let id = format!("ft{}", i+1);
+            // sample bg median not critical
+            bubbles.push(metadata::Bubble { id: id.clone(), bbox: *fb, conf: 0.90, translated: all_translations.get(&id).cloned().unwrap_or_default(), bg_color: None, style: None, edited: false, raw_text: raw_map.get(&id).cloned() });
+        }
+        let mut data = metadata::PageEditData::new(page_name.clone(), w_img, h_img, ctx.target_lang.to_string(), ctx.prompt_sig.to_string(), bubbles);
+        if ctx.ocr != "none" { data.ocr_engine = Some(ctx.ocr.clone()); }
         let meta_dir = ctx.metadata_dir.clone().unwrap_or_else(|| output_path.parent().unwrap_or(Path::new(".")).to_path_buf());
         std::fs::create_dir_all(&meta_dir)?;
         let meta_path = meta_dir.join(format!("{}.kedit.json", output_path.file_stem().unwrap_or_default().to_string_lossy()));
         metadata::save_page_metadata(&meta_path, &data)?;
         println!("    [Metadata] Saved to {:?}", meta_path);
     }
-
     Ok(())
 }
 

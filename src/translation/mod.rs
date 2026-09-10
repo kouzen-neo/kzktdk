@@ -102,18 +102,18 @@ pub fn build_translation_prompt(target_lang: &str) -> String {
 
     format!(
         r#"You are an accurate, natural manga and comic translator translating into {target_lang}.
-The image contains speech bubbles arranged vertically.
-Each bubble is prefixed with a LARGE RED NUMBER on its left as its ID.
+The image contains speech bubbles and freetext (captions/SFX) arranged vertically.
+Each item is prefixed with a LARGE RED ID on its left (numeric like "1" for bubbles, or "ft1"/"ft2" for freetext outside bubbles).
 
 MAIN TASK:
-Read the dialogue in each bubble and translate it faithfully into {target_lang}.
+Read the dialogue in each item and translate it faithfully into {target_lang}.
 
 RULES:
 1. Natural flow: Use natural conversational manga dialogue suitable for speech bubbles.{id_extra}
 2. Honorifics: Keep Japanese honorifics (san, kun, chan, sama, senpai, etc.) as-is.
-3. If a bubble contains only sound effects (SFX) or unreadable art, reply with "SKIP".
-4. Return a valid JSON object mapping every visible red number to its translation.
-5. Example: {example}
+3. If an item contains only sound effects (SFX) or unreadable art, reply with "SKIP" — but still include the key (e.g. "ft1":"SKIP").
+4. Return a valid JSON object mapping every visible red ID (including "ft1","ft2") to its translation. Include ALL IDs even if SKIP.
+5. Example: {example}  (if freetext present, also include "ft1":"Hello outside")
 
 Output ONLY the raw JSON object, without markdown fences."#
     )
