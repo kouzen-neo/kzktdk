@@ -129,7 +129,10 @@ impl TranslationCache {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("translation cache lock poisoned: {e}"))?;
         conn.execute(
             "INSERT OR REPLACE INTO translations (image_hash, target_lang, provider, model, prompt_sig, translated_text, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![image_hash, target_lang, provider, model, prompt_sig, translated_text, now],
@@ -138,7 +141,10 @@ impl TranslationCache {
     }
 
     pub fn clear(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("translation cache lock poisoned: {e}"))?;
         conn.execute("DELETE FROM translations", [])?;
         Ok(())
     }

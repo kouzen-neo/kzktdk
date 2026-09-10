@@ -7,7 +7,7 @@ use kzktdk::metadata::{self, PageEditData};
 use kzktdk::model::yolo::YoloModel;
 
 use super::args::MetadataCmd;
-use super::util::{ensure_model, find_file_in_candidates, parse_jobs};
+use super::util::{ensure_model, file_name, find_file_in_candidates, parse_jobs};
 
 pub async fn run(cmd: MetadataCmd) -> Result<()> {
     match cmd {
@@ -34,9 +34,9 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                 let img = image::open(p).with_context(|| format!("Failed to open {:?}", p))?;
                 let (w, h) = (img.width(), img.height());
                 let dets = yolo.detect_bubbles(&img)?;
-                println!("{:?}: {} bubbles", p.file_name().unwrap(), dets.len());
+                println!("{:?}: {} bubbles", file_name(p)?, dets.len());
                 pages.push(PageEditData::new(
-                    p.file_name().unwrap().to_string_lossy().to_string(),
+                    file_name(p)?.to_string_lossy().to_string(),
                     w,
                     h,
                     "English".to_string(),
@@ -70,12 +70,15 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
             }
             // Single page -> object, multi -> array for backwards compat
             let v = if pages.len() == 1 {
-                serde_json::to_value(&pages[0]).unwrap()
+                serde_json::to_value(&pages[0]).context("serialize page metadata")?
             } else {
-                serde_json::to_value(&pages).unwrap()
+                serde_json::to_value(&pages).context("serialize pages metadata")?
             };
             std::fs::create_dir_all(json.parent().unwrap_or(Path::new(".")))?;
-            std::fs::write(&json, serde_json::to_string_pretty(&v).unwrap())?;
+            std::fs::write(
+                &json,
+                serde_json::to_string_pretty(&v).context("serialize metadata JSON")?,
+            )?;
             println!("Exported {} pages to {:?}", pages.len(), json);
         }
         MetadataCmd::Render {
@@ -206,7 +209,7 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                             "[{}/{}] Rendered {:?} -> {:?}",
                             idx + 1,
                             proj.pages.len(),
-                            img_path.file_name().unwrap(),
+                            file_name(img_path.as_path())?,
                             out_path
                         );
                     }
@@ -850,7 +853,11 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                             errors: vec![],
                             meta: serde_json::json!({"version": proj.version, "pages": proj.pages.len(), "target_lang": proj.target_lang}),
                         };
-                        println!("{}", serde_json::to_string(&report).unwrap());
+                        println!(
+                            "{}",
+                            serde_json::to_string(&report)
+                                .context("serialize validation report")?
+                        );
                     } else if quiet {
                         eprintln!(
                             "Valid Project v{}: {} pages",
@@ -880,7 +887,10 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                     errors: issues.clone(),
                     meta: serde_json::json!({"version": data.version, "page": data.page, "width": data.width, "height": data.height, "target_lang": data.target_lang, "prompt_sig": data.prompt_sig, "bubbles": data.bubbles.len()}),
                 };
-                println!("{}", serde_json::to_string(&report).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).context("serialize validation report")?
+                );
                 if !issues.is_empty() {
                     std::process::exit(2);
                 }
@@ -1061,7 +1071,10 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
             if let Ok(proj) = serde_json::from_str::<metadata::Project>(&content) {
                 if proj.version == 1 && !proj.pages.is_empty() {
                     if as_json {
-                        println!("{}", serde_json::to_string_pretty(&proj).unwrap());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&proj).context("serialize project")?
+                        );
                         return Ok(());
                     }
                     if quiet {
@@ -1102,7 +1115,10 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
             if as_json {
                 if let Some(filter) = id.as_ref() {
                     if let Some(b) = data.bubbles.iter().find(|b| &b.id == filter) {
-                        println!("{}", serde_json::to_string_pretty(b).unwrap());
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(b).context("serialize bubble")?
+                        );
                     } else {
                         eprintln!(
                             "{}",
@@ -1111,7 +1127,10 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                         std::process::exit(2);
                     }
                 } else {
-                    println!("{}", serde_json::to_string_pretty(&data).unwrap());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&data).context("serialize page")?
+                    );
                 }
                 return Ok(());
             }
@@ -1240,11 +1259,11 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
             if files.is_empty() {
                 bail!("No images found in {:?}", input);
             }
-            // natural sort
+            // natural sort (sort keys only; read_dir entries always have names)
             files.sort_by(|a, b| {
                 natord::compare(
-                    &a.file_name().unwrap().to_string_lossy(),
-                    &b.file_name().unwrap().to_string_lossy(),
+                    &a.file_name().unwrap_or_default().to_string_lossy(),
+                    &b.file_name().unwrap_or_default().to_string_lossy(),
                 )
             });
             if let Some(parent) = output.parent() {
@@ -1260,17 +1279,13 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                         "count": files.len(),
                         "files": files.iter().map(|f| f.file_name().unwrap_or_default().to_string_lossy()).collect::<Vec<_>>(),
                     }))
-                    .unwrap()
+                    .context("serialize pack summary")?
                 );
                 return Ok(());
             }
             println!("Packed {} images -> {:?}", files.len(), output);
             for (i, f) in files.iter().enumerate() {
-                println!(
-                    "  [{:02}] {}",
-                    i + 1,
-                    f.file_name().unwrap().to_string_lossy()
-                );
+                println!("  [{:02}] {}", i + 1, file_name(f)?.to_string_lossy());
             }
         }
         MetadataCmd::Mask {
@@ -1289,7 +1304,9 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                 bubble.mask_path = None;
                 println!("Cleared mask for {}", id);
             } else {
-                let mask_path = from.clone().unwrap();
+                let Some(mask_path) = from.clone() else {
+                    bail!("--from is required unless --clear");
+                };
                 if !mask_path.is_file() {
                     eprintln!("Mask file not found: {:?}", mask_path);
                     std::process::exit(2);

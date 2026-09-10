@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::args::FontCmd;
 
@@ -17,7 +17,10 @@ pub async fn run(cmd: FontCmd) -> Result<()> {
                     "default_latin": kzktdk::font::AppConfig::get_latin(),
                     "default_cjk": kzktdk::font::AppConfig::get_cjk(),
                 });
-                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out).context("serialize font list")?
+                );
                 return Ok(());
             }
             if quiet {
@@ -66,7 +69,7 @@ pub async fn run(cmd: FontCmd) -> Result<()> {
                     serde_json::to_string_pretty(
                         &serde_json::json!({"default_latin": latin, "default_cjk": cjk})
                     )
-                    .unwrap()
+                    .context("serialize font defaults")?
                 );
                 return Ok(());
             }

@@ -6,7 +6,7 @@ use kzktdk::archive::{self, PreparedInput};
 use kzktdk::metadata;
 use kzktdk::model::yolo::YoloModel;
 
-use super::util::{ensure_model, parse_jobs};
+use super::util::{ensure_model, file_name, parse_jobs};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -65,7 +65,7 @@ pub async fn run(
             // If output is a directory, place file inside
             let out_path = if out_path.is_dir() || out_path.to_string_lossy().ends_with('/') {
                 std::fs::create_dir_all(&out_path)?;
-                out_path.join(img_path.file_name().unwrap())
+                out_path.join(file_name(img_path.as_path())?)
             } else {
                 if let Some(parent) = out_path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -181,7 +181,7 @@ pub async fn run(
                     });
                 }
                 let mut data = metadata::PageEditData::new(
-                    img_path.file_name().unwrap().to_string_lossy().to_string(),
+                    file_name(img_path.as_path())?.to_string_lossy().to_string(),
                     w,
                     h,
                     "English".to_string(),
@@ -195,7 +195,10 @@ pub async fn run(
                 dinfo!("Saved JSON to {:?}", json_path);
             }
             if as_json_d {
-                println!("{}", serde_json::to_string_pretty(&json_pages).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json_pages).context("serialize detections")?
+                );
             }
         }
         PreparedInput::Batch {
@@ -218,7 +221,7 @@ pub async fn run(
                                      w: u32,
                                      h: u32,
                                      rgb_ref: &RgbImage|
-             -> metadata::PageEditData {
+             -> Result<metadata::PageEditData> {
                 let mut ft_boxes: Vec<[u32; 4]> = Vec::new();
                 if translate_free_text && ocr != "none" {
                     let script = kzktdk::ocr::OcrScript::from_key(&ocr_script);
@@ -259,7 +262,7 @@ pub async fn run(
                     });
                 }
                 let mut data = metadata::PageEditData::new(
-                    p.file_name().unwrap().to_string_lossy().to_string(),
+                    file_name(p)?.to_string_lossy().to_string(),
                     w,
                     h,
                     "English".to_string(),
@@ -269,7 +272,7 @@ pub async fn run(
                 if ocr != "none" {
                     data.ocr_engine = Some(ocr.clone());
                 }
-                data
+                Ok(data)
             };
             if jobs_num <= 1 {
                 for (idx, p) in images.iter().enumerate() {
@@ -280,7 +283,7 @@ pub async fn run(
                         "[Page {}/{}] {:?}: {} bubbles",
                         idx + 1,
                         images.len(),
-                        p.file_name().unwrap(),
+                        file_name(p)?,
                         dets.len()
                     );
                     let rgb = img.to_rgb8();
@@ -312,7 +315,7 @@ pub async fn run(
                             }
                         }
                     }
-                    let out = out_dir.join(p.file_name().unwrap());
+                    let out = out_dir.join(file_name(p)?);
                     rgb_out.save(&out)?;
                     if as_json_d {
                         json_pages.push(det_record(
@@ -324,7 +327,7 @@ pub async fn run(
                         ));
                     }
                     if json.is_some() {
-                        all_pages.push(make_page_with_ft(p, dets, w, h, &rgb));
+                        all_pages.push(make_page_with_ft(p, dets, w, h, &rgb)?);
                     }
                 }
             } else {
@@ -337,7 +340,7 @@ pub async fn run(
                         "[Page {}/{}] {:?}: {} bubbles",
                         idx + 1,
                         images.len(),
-                        p.file_name().unwrap(),
+                        file_name(p)?,
                         dets.len()
                     );
                     let rgb = img.to_rgb8();
@@ -368,7 +371,7 @@ pub async fn run(
                             }
                         }
                     }
-                    let out = out_dir.join(p.file_name().unwrap());
+                    let out = out_dir.join(file_name(p)?);
                     rgb_out.save(&out)?;
                     if as_json_d {
                         json_pages.push(det_record(
@@ -380,19 +383,25 @@ pub async fn run(
                         ));
                     }
                     if json.is_some() {
-                        all_pages.push(make_page_with_ft(p, dets, w, h, &rgb));
+                        all_pages.push(make_page_with_ft(p, dets, w, h, &rgb)?);
                     }
                 }
             }
             dinfo!("Saved {} previews to {:?}", images.len(), out_dir);
             if let Some(json_path) = json {
-                let v = serde_json::to_value(&all_pages).unwrap();
+                let v = serde_json::to_value(&all_pages).context("serialize batch pages")?;
                 std::fs::create_dir_all(json_path.parent().unwrap_or(Path::new(".")))?;
-                std::fs::write(&json_path, serde_json::to_string_pretty(&v).unwrap())?;
+                std::fs::write(
+                    &json_path,
+                    serde_json::to_string_pretty(&v).context("serialize batch JSON")?,
+                )?;
                 dinfo!("Saved batch JSON to {:?}", json_path);
             }
             if as_json_d {
-                println!("{}", serde_json::to_string_pretty(&json_pages).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json_pages).context("serialize detections")?
+                );
             }
         }
     }

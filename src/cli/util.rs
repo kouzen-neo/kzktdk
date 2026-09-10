@@ -1,7 +1,17 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use kzktdk::model::decrypt::decrypt_model;
+
+/// File name of `path`, or a descriptive error.
+///
+/// Central replacement for `path.file_name().unwrap()`: directory/archive
+/// listings always yield file names, but this error beats a panic if one
+/// ever doesn't.
+pub fn file_name(path: &Path) -> Result<&std::ffi::OsStr> {
+    path.file_name()
+        .with_context(|| format!("Path has no file name: {}", path.display()))
+}
 
 pub fn find_file_in_candidates(relative: &str) -> Option<PathBuf> {
     let direct = Path::new(relative);

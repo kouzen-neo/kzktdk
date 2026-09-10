@@ -358,7 +358,7 @@ pub async fn run(
                 jsonl,
                 as_json,
                 verbose,
-            );
+            )?;
         }
 
         PreparedInput::Batch {
@@ -467,7 +467,7 @@ pub async fn run(
                         break;
                     }
                     ctx.page_idx = idx + 1;
-                    let file_name = file_path.file_name().unwrap();
+                    let file_name = super::util::file_name(file_path)?;
                     let target_path = temp_output_dir.join(file_name);
                     tinfo!(
                         "\n[Page {}/{}] Translating: {:?}",
@@ -571,7 +571,7 @@ pub async fn run(
                     jsonl,
                     as_json,
                     verbose,
-                );
+                )?;
             } else {
                 // Parallel with JoinSet + Semaphore
                 use tokio::sync::Semaphore;
@@ -659,9 +659,23 @@ pub async fn run(
                     let retry_c2 = retry_c.clone();
                     let total_c = total;
                     join_set.spawn(async move {
-                        let _permit = sem.acquire_owned().await.unwrap();
-                        let file_name = file_path.file_name().unwrap().to_owned();
+                        // OK: task inputs come from directory/archive listings.
+                        let file_name = file_path.file_name().unwrap_or_default().to_owned();
                         let target_path = out_dir.join(&file_name);
+                        // A closed semaphore here would be a bug (never
+                        // closed); fail the page gracefully, never panic.
+                        let _permit = match sem.acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => {
+                                return (
+                                    target_path,
+                                    idx,
+                                    false,
+                                    Some("batch semaphore closed unexpectedly".to_string()),
+                                    false,
+                                );
+                            }
+                        };
                         // --retry-failed: reuse previous good output without loading models.
                         if let Some(ref rdir) = retry_c2 {
                             if let Some(prev) = retry_hit(rdir, file_name.as_os_str()) {
@@ -669,8 +683,9 @@ pub async fn run(
                                 return (target_path, idx, true, None, true);
                             }
                         }
-                        // Rebuild chain per task (cheap)
-                        let primary = build_provider(
+                        // Rebuild chain per task (cheap). A bad provider name
+                        // fails the page gracefully instead of panicking.
+                        let primary = match build_provider(
                             &provider_name,
                             &gemini_key_c,
                             &gemini_model_c,
@@ -679,8 +694,18 @@ pub async fn run(
                             &openai_model_c,
                             &claude_key_c,
                             &claude_model_c,
-                        )
-                        .expect("primary provider build failed");
+                        ) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                return (
+                                    target_path,
+                                    idx,
+                                    false,
+                                    Some(format!("provider init failed: {e:#}")),
+                                    false,
+                                );
+                            }
+                        };
                         let mut fallbacks = Vec::new();
                         if let Some(fb) = fallback_str_c {
                             for fb_name in fb.split(',').map(|s| s.trim()).filter(|s| !s.is_empty())
@@ -705,8 +730,33 @@ pub async fn run(
                         let chain = ProviderChain { primary, fallbacks };
                         let limiter = RateLimiter::new(rate_limit_c);
                         // Checkout one pooled model (released below before returning).
-                        let _pool_permit = pool_sem_c.acquire_owned().await.unwrap();
-                        let mut yolo = pool_c.lock().unwrap().pop().expect("yolo pool exhausted");
+                        let _pool_permit = match pool_sem_c.acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => {
+                                return (
+                                    target_path,
+                                    idx,
+                                    false,
+                                    Some("yolo-pool semaphore closed unexpectedly".to_string()),
+                                    false,
+                                );
+                            }
+                        };
+                        let mut yolo = match pool_c.lock().ok().and_then(|mut pool| pool.pop()) {
+                            Some(y) => y,
+                            None => {
+                                return (
+                                    target_path,
+                                    idx,
+                                    false,
+                                    Some(
+                                        "BUG: yolo pool exhausted despite permit (report this)"
+                                            .to_string(),
+                                    ),
+                                    false,
+                                );
+                            }
+                        };
                         // per-task cache (open fresh connection to avoid !Send)
                         let cache_local: Option<TranslationCache> = if use_cache_flag {
                             TranslationCache::open().ok()
@@ -740,7 +790,11 @@ pub async fn run(
                             page_total: total_c,
                         };
                         let res = translate_page(&file_path, &target_path, &mut yolo, &ctx).await;
-                        pool_c.lock().unwrap().push(yolo);
+                        // A poisoned pool means an earlier task failed; the
+                        // model just drops instead of panicking here.
+                        if let Ok(mut pool) = pool_c.lock() {
+                            pool.push(yolo);
+                        }
                         match res {
                             Ok(()) => (target_path, idx, true, None, false),
                             Err(e) => {
@@ -905,7 +959,7 @@ pub async fn run(
                     jsonl,
                     as_json,
                     verbose,
-                );
+                )?;
             }
         }
     }
@@ -986,7 +1040,7 @@ fn finish_translate(
     jsonl: bool,
     as_json: bool,
     verbose: bool,
-) {
+) -> Result<()> {
     let summary = translate_summary(records, gloss_hits, gloss_misses, &output_desc);
     let fails = records.iter().filter(|r| !r.ok).count();
     if jsonl {
@@ -1012,7 +1066,10 @@ fn finish_translate(
         );
     }
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).context("serialize translate summary")?
+        );
     }
     if CANCELLED.load(Ordering::SeqCst) {
         std::process::exit(130);
@@ -1020,4 +1077,5 @@ fn finish_translate(
     if fails > 0 {
         std::process::exit(1);
     }
+    Ok(())
 }
