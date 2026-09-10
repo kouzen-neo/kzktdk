@@ -159,30 +159,20 @@ pub async fn run(
                 let mut bubbles: Vec<metadata::Bubble> = detections
                     .iter()
                     .enumerate()
-                    .map(|(i, d)| metadata::Bubble {
-                        id: (i + 1).to_string(),
-                        bbox: [d.x1, d.y1, d.x2, d.y2],
-                        conf: d.conf,
-                        translated: String::new(),
-                        bg_color: None,
-                        style: None,
-                        edited: false,
-                        raw_text: None,
-                        mask_path: None,
+                    .map(|(i, d)| {
+                        metadata::Bubble::detected(
+                            (i + 1).to_string(),
+                            [d.x1, d.y1, d.x2, d.y2],
+                            d.conf,
+                        )
                     })
                     .collect();
                 for (i, fb) in ft_boxes.iter().enumerate() {
-                    bubbles.push(metadata::Bubble {
-                        id: format!("ft{}", i + 1),
-                        bbox: *fb,
-                        conf: 0.90,
-                        translated: String::new(),
-                        bg_color: None,
-                        style: None,
-                        edited: false,
-                        raw_text: None,
-                        mask_path: None,
-                    });
+                    bubbles.push(metadata::Bubble::detected(
+                        format!("ft{}", i + 1),
+                        *fb,
+                        0.90,
+                    ));
                 }
                 let mut data = metadata::PageEditData::new(
                     file_name(img_path.as_path())?.to_string_lossy().to_string(),
@@ -240,30 +230,20 @@ pub async fn run(
                 let mut bubbles: Vec<metadata::Bubble> = dets
                     .iter()
                     .enumerate()
-                    .map(|(i, d)| metadata::Bubble {
-                        id: (i + 1).to_string(),
-                        bbox: [d.x1, d.y1, d.x2, d.y2],
-                        conf: d.conf,
-                        translated: String::new(),
-                        bg_color: None,
-                        style: None,
-                        edited: false,
-                        raw_text: None,
-                        mask_path: None,
+                    .map(|(i, d)| {
+                        metadata::Bubble::detected(
+                            (i + 1).to_string(),
+                            [d.x1, d.y1, d.x2, d.y2],
+                            d.conf,
+                        )
                     })
                     .collect();
                 for (i, fb) in ft_boxes.iter().enumerate() {
-                    bubbles.push(metadata::Bubble {
-                        id: format!("ft{}", i + 1),
-                        bbox: *fb,
-                        conf: 0.90,
-                        translated: String::new(),
-                        bg_color: None,
-                        style: None,
-                        edited: false,
-                        raw_text: None,
-                        mask_path: None,
-                    });
+                    bubbles.push(metadata::Bubble::detected(
+                        format!("ft{}", i + 1),
+                        *fb,
+                        0.90,
+                    ));
                 }
                 let mut data = metadata::PageEditData::new(
                     file_name(p)?.to_string_lossy().to_string(),

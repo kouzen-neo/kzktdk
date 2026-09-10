@@ -38,6 +38,27 @@ pub struct Bubble {
     pub mask_path: Option<String>,
 }
 
+impl Bubble {
+    /// Freshly-detected bubble: id/bbox/conf set, everything else empty.
+    ///
+    /// Shared constructor for all detection sites (replaces ~10 copied
+    /// literals). Bubbles carrying real content (`translated`, `raw_text`)
+    /// keep explicit literals so the difference stays visible.
+    pub fn detected(id: String, bbox: [u32; 4], conf: f32) -> Self {
+        Self {
+            id,
+            bbox,
+            conf,
+            translated: String::new(),
+            bg_color: None,
+            style: None,
+            edited: false,
+            raw_text: None,
+            mask_path: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageEditData {
     pub version: u32,

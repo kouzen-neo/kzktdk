@@ -43,16 +43,12 @@ pub async fn run(cmd: MetadataCmd) -> Result<()> {
                     "classic".to_string(),
                     dets.iter()
                         .enumerate()
-                        .map(|(i, d)| metadata::Bubble {
-                            id: (i + 1).to_string(),
-                            bbox: [d.x1, d.y1, d.x2, d.y2],
-                            conf: d.conf,
-                            translated: String::new(),
-                            bg_color: None,
-                            style: None,
-                            edited: false,
-                            raw_text: None,
-                            mask_path: None,
+                        .map(|(i, d)| {
+                            metadata::Bubble::detected(
+                                (i + 1).to_string(),
+                                [d.x1, d.y1, d.x2, d.y2],
+                                d.conf,
+                            )
                         })
                         .collect(),
                 ));
