@@ -68,6 +68,17 @@ pub async fn run(
     }
     // Validate mode/ocr_script early
     let ocr_script_enum = kzktdk::ocr::OcrScript::from_key(&ocr_script);
+    // Fail fast: stub OCR engines cannot read text (never guess).
+    if translate_free_text || mode == "ocr" {
+        let what = if translate_free_text {
+            "--translate-free-text"
+        } else {
+            "--mode ocr"
+        };
+        if ocr != "none" {
+            kzktdk::ocr::ensure_rec_available(&ocr, what)?;
+        }
+    }
     let _ = mode.clone();
     let _ = ocr_script_enum;
     let _ = ocr_model.clone();

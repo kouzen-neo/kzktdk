@@ -257,6 +257,17 @@ pub fn editor_translate_batch(
         }
         inputs.push(ip);
     }
+    // Fail fast: stub OCR engines cannot read text (never guess).
+    if config.translate_free_text || config.mode == "ocr" {
+        let what = if config.translate_free_text {
+            "--translate-free-text"
+        } else {
+            "--mode ocr"
+        };
+        if config.ocr != "none" {
+            crate::ocr::ensure_rec_available(&config.ocr, what).map_err(err)?;
+        }
+    }
 
     let primary = build_provider(
         &config.provider,

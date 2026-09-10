@@ -51,6 +51,49 @@ pub trait OcrEngine: Send + Sync {
     }
 }
 
+// ---------- rec support ----------
+//
+// Text *recognition* (reading characters) is NOT implemented for the
+// rapid/manga stub engines: they can detect boxes but must never guess
+// text. `tesseract` delegates to the real external binary (when installed).
+// Callers that explicitly need rec (`--translate-free-text`, `--mode ocr`)
+// must fail fast via `ensure_rec_available` instead of translating lies.
+
+/// True when `name` selects a KNOWN engine without real text recognition
+/// (rapid/manga stubs). Unknown names fall back to noop elsewhere; "none"
+/// and "tesseract" are not stubs.
+pub fn engine_rec_stub(name: &str) -> bool {
+    matches!(name.to_lowercase().as_str(), "rapid" | "manga")
+}
+
+/// Fail fast when rec is explicitly required but the engine is a stub.
+pub fn ensure_rec_available(ocr: &str, what: &str) -> anyhow::Result<()> {
+    if engine_rec_stub(ocr) {
+        anyhow::bail!(
+            "OCR text recognition (rec) is not implemented for engine '{ocr}': \
+             stub engines detect boxes but cannot read text, so {what} cannot run. \
+             Use --ocr tesseract (requires the tesseract binary) or omit the flag. \
+             Implementation tracked at src/ocr.rs::rapid_recognize_crop."
+        );
+    }
+    Ok(())
+}
+
+fn warn_rec_stub_once(engine: &'static str) {
+    static WARNED_RAPID: std::sync::Once = std::sync::Once::new();
+    static WARNED_MANGA: std::sync::Once = std::sync::Once::new();
+    let once = match engine {
+        "rapid" => &WARNED_RAPID,
+        _ => &WARNED_MANGA,
+    };
+    once.call_once(|| {
+        eprintln!(
+            "[OCR] engine '{engine}': text recognition (rec) is NOT implemented — \
+             returning no text (never guessing). Detection boxes still work."
+        );
+    });
+}
+
 // ---------- Noop ----------
 
 pub struct NoopOcr;
@@ -66,9 +109,10 @@ impl OcrEngine for NoopOcr {
     }
 }
 
-// ---------- Stub engines (rapid/manga/tesseract) ----------
-// Full ONNX inference will be added later; for now they behave like Noop
-// but trigger auto-download and log correctly for freetext detection.
+// ---------- Stub engines (rapid/manga) ----------
+// Detection may work when models are cached, but text recognition (rec) is
+// NOT implemented: they return no text and fail fast when rec is required
+// (see ensure_rec_available). Tesseract below is real (external binary).
 
 pub struct RapidOcr {
     pub model_path: Option<PathBuf>,
@@ -78,7 +122,7 @@ pub struct RapidOcr {
 }
 impl OcrEngine for RapidOcr {
     fn recognize(&self, image: &RgbImage, bbox: [u32; 4]) -> Option<String> {
-        // if real model present, try ort rec; fallback dummy
+        // if real model present, try ort rec; never guess
         if let (Some(rec), Some(dict)) = (&self.rec_path, &self.dict_path) {
             if rec.exists() && dict.exists() {
                 if let Some(s) = rapid_recognize_crop(image, bbox, rec, dict) {
@@ -86,7 +130,8 @@ impl OcrEngine for RapidOcr {
                 }
             }
         }
-        Some("テスト".to_string())
+        warn_rec_stub_once("rapid");
+        None
     }
     fn recognize_regions(&self, full: &RgbImage, _exclude: &[[u32; 4]]) -> Vec<TextRegion> {
         if full.width() < 20 || full.height() < 20 {
@@ -102,11 +147,8 @@ impl OcrEngine for RapidOcr {
                 }
             }
         }
-        // fallback dummy if model not ready or detection empty
-        vec![TextRegion {
-            bbox: [20, 20, 120, 60],
-            text: "フリーテキスト".to_string(),
-        }]
+        // No models (or empty detection): honest empty, never fake boxes.
+        Vec::new()
     }
     fn name(&self) -> &'static str {
         "rapid"
@@ -117,7 +159,9 @@ fn rapid_detect_regions(full: &RgbImage, det: &Path, rec: &Path, dict: &Path) ->
     match rapid_detect_ort(full, det, rec, dict) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[rapid] det failed: {e} — fallback dummy");
+            eprintln!(
+                "[rapid] det failed: {e} — no regions (rec unsupported, see ensure_rec_available)"
+            );
             Vec::new()
         }
     }
@@ -242,18 +286,19 @@ fn rapid_detect_ort(
             }
         }
     }
-    // for each box try rec to get text, else placeholder
+    // for each box try rec to get text; skip boxes we cannot read
+    // (never emit placeholder text)
     let mut regs = Vec::new();
     for b in boxes {
-        let txt =
-            rapid_recognize_crop(full, b, rec, dict).unwrap_or_else(|| "テキスト".to_string());
-        regs.push(TextRegion { bbox: b, text: txt });
+        if let Some(txt) = rapid_recognize_crop(full, b, rec, dict) {
+            regs.push(TextRegion { bbox: b, text: txt });
+        }
     }
     Ok(regs)
 }
 fn rapid_recognize_crop(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path) -> Option<String> {
     let _ = (img, bbox, rec, dict);
-    // TODO real rec: crop resize 32x, ort rec session, dict decode — for now dummy
+    // TODO real rec: crop resize 32x, ort rec session, dict decode (tracked: ensure_rec_available)
     None
 }
 
@@ -262,16 +307,12 @@ pub struct MangaOcr {
 }
 impl OcrEngine for MangaOcr {
     fn recognize(&self, _image: &RgbImage, _bbox: [u32; 4]) -> Option<String> {
-        Some("テスト".to_string())
+        warn_rec_stub_once("manga");
+        None
     }
-    fn recognize_regions(&self, full: &RgbImage, _exclude: &[[u32; 4]]) -> Vec<TextRegion> {
-        if full.width() < 20 || full.height() < 20 {
-            return Vec::new();
-        }
-        vec![TextRegion {
-            bbox: [20, 20, 120, 60],
-            text: "フリーテキスト".to_string(),
-        }]
+    fn recognize_regions(&self, _full: &RgbImage, _exclude: &[[u32; 4]]) -> Vec<TextRegion> {
+        // Stub: no detection implementation — honest empty, never fake boxes.
+        Vec::new()
     }
     fn name(&self) -> &'static str {
         "manga"
@@ -464,7 +505,7 @@ fn ensure_rapid_cached(custom_path: Option<&Path>) -> Option<(PathBuf, PathBuf, 
         let ok_dict = download_file(dict_url, &dict);
         if !ok_det || !ok_rec || !ok_dict {
             eprintln!(
-                "[OCR] rapid download incomplete det:{} rec:{} dict:{} — will use dummy but files partially cached at {:?}",
+                "[OCR] rapid download incomplete det:{} rec:{} dict:{} — rec stays unavailable but files partially cached at {:?}",
                 ok_det, ok_rec, ok_dict, dir
             );
         } else {
@@ -581,5 +622,45 @@ pub fn create_ocr_engine(
             eprintln!("[OCR] unknown engine '{}', fallback none", other);
             Box::new(NoopOcr)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stub_engines_report_no_rec() {
+        assert!(engine_rec_stub("rapid"));
+        assert!(engine_rec_stub("MANGA"));
+        assert!(!engine_rec_stub("tesseract"));
+        assert!(!engine_rec_stub("none"));
+        assert!(!engine_rec_stub("bogus"));
+    }
+
+    #[test]
+    fn ensure_rec_available_fails_fast_for_stubs() {
+        assert!(ensure_rec_available("rapid", "--mode ocr").is_err());
+        assert!(ensure_rec_available("manga", "--translate-free-text").is_err());
+        assert!(ensure_rec_available("tesseract", "--mode ocr").is_ok());
+        assert!(ensure_rec_available("none", "--mode ocr").is_ok());
+        let e = ensure_rec_available("rapid", "--mode ocr").unwrap_err();
+        assert!(e.to_string().contains("not implemented"), "unexpected: {e}");
+    }
+
+    #[test]
+    fn stub_engines_never_guess_text() {
+        let img = RgbImage::from_pixel(64, 64, image::Rgb([255, 255, 255]));
+        let rapid = RapidOcr {
+            model_path: None,
+            det_path: None,
+            rec_path: None,
+            dict_path: None,
+        };
+        assert_eq!(rapid.recognize(&img, [5, 5, 50, 50]), None);
+        assert!(rapid.recognize_regions(&img, &[]).is_empty());
+        let manga = MangaOcr { model_path: None };
+        assert_eq!(manga.recognize(&img, [5, 5, 50, 50]), None);
+        assert!(manga.recognize_regions(&img, &[]).is_empty());
     }
 }

@@ -128,6 +128,18 @@ pub async fn translate_page(
     yolo: &mut YoloModel,
     ctx: &TranslationContext<'_>,
 ) -> Result<()> {
+    // Fail fast when rec is explicitly required but the engine is a stub
+    // (never translate placeholder guesses).
+    if ctx.translate_free_text || ctx.mode == "ocr" {
+        let what = if ctx.translate_free_text {
+            "--translate-free-text"
+        } else {
+            "--mode ocr"
+        };
+        if ctx.ocr != "none" {
+            crate::ocr::ensure_rec_available(&ctx.ocr, what)?;
+        }
+    }
     let jsonl = ctx.progress == "jsonl";
     let silent_events = ctx.events.is_some();
     let verbose = !(jsonl || ctx.quiet) && !silent_events;

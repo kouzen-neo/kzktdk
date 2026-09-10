@@ -481,3 +481,29 @@ fn translate_format_json_stdout_stays_pure() {
         });
     }
 }
+
+#[test]
+fn stub_ocr_rec_fails_fast_without_model() {
+    // Fase-4: --translate-free-text / --mode ocr with rapid|manga must fail
+    // with "not implemented" BEFORE model load (hermetic: needs no model,
+    // no keys, no network — translate needs no input, detect never opens it).
+    let cases: &[&[&str]] = &[
+        &["translate", "--mode", "ocr", "--ocr", "rapid"],
+        &["translate", "--translate-free-text", "--ocr", "manga"],
+        &[
+            "detect",
+            "/definitely/not/here.png",
+            "--translate-free-text",
+            "--ocr",
+            "rapid",
+        ],
+    ];
+    for args in cases {
+        let (code, _, stderr) = run(args);
+        assert_ne!(code, 0, "stub rec should fail fast: {args:?}");
+        assert!(
+            stderr.to_lowercase().contains("not implemented"),
+            "expected rec-unsupported error, got: {stderr}"
+        );
+    }
+}

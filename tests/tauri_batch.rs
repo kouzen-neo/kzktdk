@@ -253,3 +253,29 @@ fn hostile_inputs_fail_gracefully_never_panic() {
     );
     assert!(r.is_err(), "file-as-out-dir should be rejected");
 }
+
+#[test]
+fn stub_ocr_rec_is_rejected_before_model_load() {
+    // Fase-4: freetext/mode-ocr with a stub engine is a setup Err
+    // (hermetic: 0-byte image passes the is_file check, guard fires first).
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("p.png");
+    std::fs::write(&png, b"").unwrap();
+    for (freetext, mode) in [(true, "vision"), (false, "ocr")] {
+        let mut c = TranslateConfig::default();
+        c.ocr = "rapid".to_string();
+        c.translate_free_text = freetext;
+        c.mode = mode.to_string();
+        let r = editor_translate_batch(
+            vec![png.to_str().unwrap().to_string()],
+            dir.path().join("out").to_str().unwrap(),
+            c,
+            |_| {},
+        );
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("not implemented"),
+            "freetext={freetext} mode={mode}: unexpected: {e}"
+        );
+    }
+}

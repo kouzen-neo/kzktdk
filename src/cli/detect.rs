@@ -51,6 +51,10 @@ pub async fn run(
         })
     };
     let mut json_pages: Vec<serde_json::Value> = Vec::new();
+    // Fail fast: stub OCR engines cannot read text (never guess).
+    if translate_free_text && ocr != "none" {
+        kzktdk::ocr::ensure_rec_available(&ocr, "--translate-free-text")?;
+    }
     let model_file = ensure_model(&model)?;
     dinfo!("[1/2] Loading model from {:?}...", model_file);
     let mut yolo = YoloModel::new(&model_file)?;

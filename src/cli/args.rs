@@ -94,7 +94,7 @@ pub enum Commands {
         /// OCR script for freetext: auto|jp|en|kr|cn
         #[arg(long, default_value = "jp")]
         ocr_script: String,
-        /// OCR engine for freetext: none|rapid|manga|tesseract
+        /// OCR engine for freetext: none|rapid|manga|tesseract (NOTE: rapid/manga have no text recognition yet — detection only; --translate-free-text with them fails fast)
         #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "rapid", "manga", "tesseract", "vision", "local"]))]
         ocr: String,
         /// Custom OCR model path override
@@ -202,7 +202,7 @@ Examples:
         /// Custom metadata directory (default: same as output)
         #[arg(long)]
         metadata_dir: Option<PathBuf>,
-        /// OCR engine: none (default), rapid, manga, tesseract — pluggable
+        /// OCR engine: none (default), rapid, manga, tesseract — pluggable (NOTE: rapid/manga have no text recognition yet; --translate-free-text/--mode ocr with them fails fast, tesseract needs its binary)
         #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "rapid", "manga", "tesseract", "vision", "local"]))]
         ocr: String,
         /// Translate freetext outside bubbles (requires --ocr rapid|manga|tesseract)
