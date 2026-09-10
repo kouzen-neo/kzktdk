@@ -20,6 +20,7 @@ pub enum OcrScript {
     English,
     Korean,
     Chinese,
+    ChineseTraditional,
     Auto,
 }
 
@@ -30,6 +31,7 @@ impl OcrScript {
             "en" | "english" => Self::English,
             "kr" | "korean" | "ko" => Self::Korean,
             "cn" | "chinese" | "zh" => Self::Chinese,
+            "cht" | "zh-tw" | "zh-hk" => Self::ChineseTraditional,
             "auto" => Self::Auto,
             _ => Self::Japanese,
         }
@@ -60,20 +62,25 @@ pub trait OcrEngine: Send + Sync {
 // must fail fast via `ensure_rec_available` instead of translating lies.
 
 /// True when `name` selects a KNOWN engine without real text recognition
-/// (rapid/manga stubs). Unknown names fall back to noop elsewhere; "none"
-/// and "tesseract" are not stubs.
+/// (manga stub only now; rapid has rec). Unknown names fall back to noop elsewhere.
 pub fn engine_rec_stub(name: &str) -> bool {
-    matches!(name.to_lowercase().as_str(), "rapid" | "manga")
+    matches!(name.to_lowercase().as_str(), "manga")
 }
 
-/// Fail fast when rec is explicitly required but the engine is a stub.
-pub fn ensure_rec_available(ocr: &str, what: &str) -> anyhow::Result<()> {
+/// Fail fast when rec is explicitly required but the engine is a stub or script unsupported.
+pub fn ensure_rec_available(ocr: &str, script: OcrScript) -> anyhow::Result<()> {
     if engine_rec_stub(ocr) {
         anyhow::bail!(
             "OCR text recognition (rec) is not implemented for engine '{ocr}': \
-             stub engines detect boxes but cannot read text, so {what} cannot run. \
-             Use --ocr tesseract (requires the tesseract binary) or omit the flag. \
-             Implementation tracked at src/ocr.rs::rapid_recognize_crop."
+             stub engine cannot read text, so the requested operation cannot run. \
+             Use --ocr tesseract or --ocr rapid instead."
+        );
+    }
+    if ocr.to_lowercase() == "rapid" && script == OcrScript::ChineseTraditional {
+        anyhow::bail!(
+            "OCR script 'cht' (Traditional Chinese) is not yet supported: \
+             no ONNX model available for download. Use 'cn' (Simplified) instead, \
+             or --ocr tesseract with chi_tra traineddata if installed."
         );
     }
     Ok(())
@@ -119,6 +126,7 @@ pub struct RapidOcr {
     pub det_path: Option<PathBuf>,
     pub rec_path: Option<PathBuf>,
     pub dict_path: Option<PathBuf>,
+    pub script: OcrScript,
 }
 impl OcrEngine for RapidOcr {
     fn recognize(&self, image: &RgbImage, bbox: [u32; 4]) -> Option<String> {
@@ -329,6 +337,7 @@ impl TesseractOcr {
             OcrScript::English => "eng".to_string(),
             OcrScript::Korean => "kor+eng".to_string(),
             OcrScript::Chinese => "chi_sim+chi_tra+eng".to_string(),
+            OcrScript::ChineseTraditional => "chi_tra+eng".to_string(),
             OcrScript::Auto => "jpn_vert+jpn+eng".to_string(),
         }
     }
@@ -483,7 +492,7 @@ fn download_file(url: &str, dst: &Path) -> bool {
     false
 }
 
-fn ensure_rapid_cached(custom_path: Option<&Path>) -> Option<(PathBuf, PathBuf, PathBuf)> {
+fn ensure_rapid_cached(custom_path: Option<&Path>, script: OcrScript) -> Option<(PathBuf, PathBuf, PathBuf)> {
     if let Some(p) = custom_path {
         if p.exists() {
             return Some((p.to_path_buf(), p.to_path_buf(), p.to_path_buf()));
@@ -491,38 +500,57 @@ fn ensure_rapid_cached(custom_path: Option<&Path>) -> Option<(PathBuf, PathBuf, 
         eprintln!("[OCR] custom --ocr-model {:?} not found", p);
     }
     let dir = cache_dir_for("rapid");
+    let _ = std::fs::create_dir_all(&dir);
     let det = dir.join("ch_PP-OCRv3_det_infer.onnx");
-    let rec = dir.join("japan_rec_crnn.onnx");
-    let dict = dir.join("japan_dict.txt");
-    let need_dl = !det.exists() || !rec.exists() || !dict.exists();
-    if need_dl {
-        let _ = std::fs::create_dir_all(&dir);
+    
+    // For auto, download all supported scripts
+    let scripts_to_download = if script == OcrScript::Auto {
+        vec![OcrScript::English, OcrScript::Japanese, OcrScript::Korean, OcrScript::Chinese]
+    } else {
+        vec![script]
+    };
+    
+    if !det.exists() {
         let det_url = crate::config::RAPIDOCR_DET_URL;
-        let rec_url = crate::config::RAPIDOCR_REC_URL;
-        let dict_url = crate::config::PADDLE_JAPAN_DICT_URL;
-        let ok_det = download_file(det_url, &det);
-        let ok_rec = download_file(rec_url, &rec);
-        let ok_dict = download_file(dict_url, &dict);
-        if !ok_det || !ok_rec || !ok_dict {
-            eprintln!(
-                "[OCR] rapid download incomplete det:{} rec:{} dict:{} — rec stays unavailable but files partially cached at {:?}",
-                ok_det, ok_rec, ok_dict, dir
-            );
-        } else {
-            eprintln!(
-                "[OCR] rapid models cached at {:?} (det {} rec {} dict {})",
-                dir,
-                det.exists(),
-                rec.exists(),
-                dict.exists()
-            );
+        let _ = download_file(det_url, &det);
+    }
+    
+    for s in scripts_to_download {
+        if let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(s) {
+            let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
+            let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+            let rec = dir.join(rec_name);
+            let dict = dir.join(dict_name);
+            
+            if !rec.exists() {
+                eprintln!("[OCR] downloading {:?} rec model...", s);
+                let _ = download_file(rec_url, &rec);
+            }
+            if !dict.exists() {
+                let _ = download_file(dict_url, &dict);
+            }
         }
     }
-    if det.exists() && rec.exists() {
-        Some((det, rec, dict))
+    
+    // Return paths for the requested script (or first available if auto)
+    let target_script = if script == OcrScript::Auto {
+        OcrScript::Japanese
     } else {
-        None
+        script
+    };
+    
+    if let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(target_script) {
+        let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
+        let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+        let rec = dir.join(rec_name);
+        let dict = dir.join(dict_name);
+        
+        if det.exists() && rec.exists() && dict.exists() {
+            return Some((det, rec, dict));
+        }
     }
+    
+    None
 }
 
 fn ensure_model_cached(engine: &str, custom_path: Option<&Path>) -> Option<PathBuf> {
@@ -587,13 +615,14 @@ pub fn create_ocr_engine(
     match name.to_lowercase().as_str() {
         "none" => Box::new(NoopOcr),
         "rapid" => {
-            let cached = ensure_rapid_cached(ocr_model);
+            let cached = ensure_rapid_cached(ocr_model, script);
             if let Some((det, rec, dict)) = cached {
                 Box::new(RapidOcr {
                     model_path: Some(det.clone()),
                     det_path: Some(det),
                     rec_path: Some(rec),
                     dict_path: Some(dict),
+                    script,
                 })
             } else {
                 let p = ensure_model_cached("rapid", ocr_model);
@@ -602,6 +631,7 @@ pub fn create_ocr_engine(
                     det_path: None,
                     rec_path: None,
                     dict_path: None,
+                    script,
                 })
             }
         }
@@ -631,8 +661,9 @@ mod tests {
 
     #[test]
     fn stub_engines_report_no_rec() {
-        assert!(engine_rec_stub("rapid"));
+        assert!(engine_rec_stub("manga"));
         assert!(engine_rec_stub("MANGA"));
+        assert!(!engine_rec_stub("rapid"));
         assert!(!engine_rec_stub("tesseract"));
         assert!(!engine_rec_stub("none"));
         assert!(!engine_rec_stub("bogus"));
@@ -640,12 +671,13 @@ mod tests {
 
     #[test]
     fn ensure_rec_available_fails_fast_for_stubs() {
-        assert!(ensure_rec_available("rapid", "--mode ocr").is_err());
-        assert!(ensure_rec_available("manga", "--translate-free-text").is_err());
-        assert!(ensure_rec_available("tesseract", "--mode ocr").is_ok());
-        assert!(ensure_rec_available("none", "--mode ocr").is_ok());
-        let e = ensure_rec_available("rapid", "--mode ocr").unwrap_err();
-        assert!(e.to_string().contains("not implemented"), "unexpected: {e}");
+        assert!(ensure_rec_available("manga", OcrScript::Japanese).is_err());
+        assert!(ensure_rec_available("tesseract", OcrScript::Japanese).is_ok());
+        assert!(ensure_rec_available("none", OcrScript::Japanese).is_ok());
+        assert!(ensure_rec_available("rapid", OcrScript::Japanese).is_ok());
+        assert!(ensure_rec_available("rapid", OcrScript::ChineseTraditional).is_err());
+        let e = ensure_rec_available("rapid", OcrScript::ChineseTraditional).unwrap_err();
+        assert!(e.to_string().contains("not yet supported"), "unexpected: {e}");
     }
 
     #[test]
@@ -656,6 +688,7 @@ mod tests {
             det_path: None,
             rec_path: None,
             dict_path: None,
+            script: OcrScript::Japanese,
         };
         assert_eq!(rapid.recognize(&img, [5, 5, 50, 50]), None);
         assert!(rapid.recognize_regions(&img, &[]).is_empty());

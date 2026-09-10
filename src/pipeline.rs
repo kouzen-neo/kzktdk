@@ -54,7 +54,7 @@ pub struct TranslationContext<'a> {
     pub metadata_dir: Option<PathBuf>,
     pub translate_free_text: bool,
     pub ocr: String,
-    pub ocr_script: String,
+    pub ocr_script: crate::ocr::OcrScript,
     pub mode: String,
     pub ocr_model: Option<PathBuf>,
     pub glossary: Option<BTreeMap<String, String>>,
@@ -137,7 +137,7 @@ pub async fn translate_page(
             "--mode ocr"
         };
         if ctx.ocr != "none" {
-            crate::ocr::ensure_rec_available(&ctx.ocr, what)?;
+            crate::ocr::ensure_rec_available(&ctx.ocr, ctx.ocr_script)?;
         }
     }
     let jsonl = ctx.progress == "jsonl";

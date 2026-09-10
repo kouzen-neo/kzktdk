@@ -258,14 +258,10 @@ pub fn editor_translate_batch(
         inputs.push(ip);
     }
     // Fail fast: stub OCR engines cannot read text (never guess).
+    let ocr_script_enum = crate::ocr::OcrScript::from_key(&config.ocr_script);
     if config.translate_free_text || config.mode == "ocr" {
-        let what = if config.translate_free_text {
-            "--translate-free-text"
-        } else {
-            "--mode ocr"
-        };
         if config.ocr != "none" {
-            crate::ocr::ensure_rec_available(&config.ocr, what).map_err(err)?;
+            crate::ocr::ensure_rec_available(&config.ocr, ocr_script_enum).map_err(err)?;
         }
     }
 
@@ -353,7 +349,7 @@ pub fn editor_translate_batch(
             metadata_dir: Some(out_path.to_path_buf()),
             translate_free_text: config.translate_free_text,
             ocr: config.ocr.clone(),
-            ocr_script: config.ocr_script.clone(),
+            ocr_script: ocr_script_enum,
             mode: config.mode.clone(),
             ocr_model: None,
             glossary: glossary_map.clone(),

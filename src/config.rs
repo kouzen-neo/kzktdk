@@ -130,17 +130,35 @@ pub const METADATA_LOCK_POLL_MS: u64 = 10;
 // OCR model download URLs (auto-fetch on first `--ocr rapid` use)
 // ---------------------------------------------------------------------------
 
-/// RapidOCR detection model (PP-OCRv3).
+/// RapidOCR detection model (PP-OCRv3, multilingual).
 pub const RAPIDOCR_DET_URL: &str =
     "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_PP-OCRv3_det_infer.onnx";
 
-/// RapidOCR Japanese recognition model (PP-OCRv1 CRNN).
-pub const RAPIDOCR_REC_URL: &str =
-    "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/japan_rec_crnn.onnx";
-
-/// PaddleOCR Japanese character dictionary.
-pub const PADDLE_JAPAN_DICT_URL: &str =
-    "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/japan_dict.txt";
+/// RapidOCR rec + dict URLs per script.
+/// Returns (rec_model_url, dict_url) or None if unsupported.
+pub fn rapid_model_urls(script: crate::ocr::OcrScript) -> Option<(&'static str, &'static str)> {
+    use crate::ocr::OcrScript::*;
+    match script {
+        Japanese => Some((
+            "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/japan_rec_crnn.onnx",
+            "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/japan_dict.txt",
+        )),
+        Korean => Some((
+            "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/korean_mobile_v2.0_rec_infer.onnx",
+            "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/korean_dict.txt",
+        )),
+        English => Some((
+            "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/en_PP-OCRv3_rec_infer.onnx",
+            "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/en_dict.txt",
+        )),
+        Chinese => Some((
+            "https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/ch_PP-OCRv3_rec_infer.onnx",
+            "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/ppocr_keys_v1.txt",
+        )),
+        ChineseTraditional => None,
+        Auto => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {

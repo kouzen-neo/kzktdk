@@ -76,7 +76,7 @@ pub async fn run(
             "--mode ocr"
         };
         if ocr != "none" {
-            kzktdk::ocr::ensure_rec_available(&ocr, what)?;
+            kzktdk::ocr::ensure_rec_available(&ocr, ocr_script_enum)?;
         }
     }
     let _ = mode.clone();
@@ -279,7 +279,7 @@ pub async fn run(
                 metadata_dir: metadata_dir.clone(),
                 translate_free_text: translate_free_text.clone(),
                 ocr: ocr.clone(),
-                ocr_script: ocr_script.clone(),
+                ocr_script: ocr_script_enum,
                 mode: mode.clone(),
                 ocr_model: ocr_model.clone(),
                 glossary: glossary_map.clone(),
@@ -423,7 +423,7 @@ pub async fn run(
                     metadata_dir: metadata_dir.clone(),
                     translate_free_text: translate_free_text.clone(),
                     ocr: ocr.clone(),
-                    ocr_script: ocr_script.clone(),
+                    ocr_script: ocr_script_enum,
                     mode: mode.clone(),
                     ocr_model: ocr_model.clone(),
                     glossary: glossary_map.clone(),
@@ -586,7 +586,7 @@ pub async fn run(
                 let meta_dir_opt = metadata_dir.clone();
                 let translate_free_text_c = translate_free_text.clone();
                 let ocr_c = ocr.clone();
-                let ocr_script_c = ocr_script.clone();
+                let ocr_script_c = ocr_script_enum;
                 let mode_c = mode.clone();
                 let ocr_model_c = ocr_model.clone();
                 let glossary_c = glossary_map.clone();

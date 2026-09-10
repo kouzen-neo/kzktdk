@@ -51,9 +51,9 @@ pub async fn run(
         })
     };
     let mut json_pages: Vec<serde_json::Value> = Vec::new();
-    // Fail fast: stub OCR engines cannot read text (never guess).
+    let ocr_script_enum = kzktdk::ocr::OcrScript::from_key(&ocr_script);
     if translate_free_text && ocr != "none" {
-        kzktdk::ocr::ensure_rec_available(&ocr, "--translate-free-text")?;
+        kzktdk::ocr::ensure_rec_available(&ocr, ocr_script_enum)?;
     }
     let model_file = ensure_model(&model)?;
     dinfo!("[1/2] Loading model from {:?}...", model_file);
