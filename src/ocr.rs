@@ -3,6 +3,27 @@ use ndarray::Array4;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashMap;
+
+// ---------- Session cache ----------
+
+static SESSION_CACHE: OnceLock<Mutex<HashMap<String, Arc<Mutex<Session>>>>> = OnceLock::new();
+
+fn get_or_load_session(path: &Path) -> anyhow::Result<Arc<Mutex<Session>>> {
+    let cache = SESSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = path.to_string_lossy().to_string();
+    
+    let mut lock = cache.lock().map_err(|e| anyhow::anyhow!("cache lock poisoned: {}", e))?;
+    if let Some(sess) = lock.get(&key) {
+        return Ok(Arc::clone(sess));
+    }
+    
+    let sess = Session::builder()?.commit_from_file(path)?;
+    let wrapped = Arc::new(Mutex::new(sess));
+    lock.insert(key, Arc::clone(&wrapped));
+    Ok(wrapped)
+}
 
 // ---------- TextRegion ----------
 
@@ -149,7 +170,7 @@ impl OcrEngine for RapidOcr {
             (&self.det_path, &self.rec_path, &self.dict_path)
         {
             if det.exists() && rec.exists() && dict.exists() {
-                let regs = rapid_detect_regions(full, det, rec, dict);
+                let regs = rapid_detect_regions(full, det, rec, dict, self.script);
                 if !regs.is_empty() {
                     return regs;
                 }
@@ -163,12 +184,12 @@ impl OcrEngine for RapidOcr {
     }
 }
 
-fn rapid_detect_regions(full: &RgbImage, det: &Path, rec: &Path, dict: &Path) -> Vec<TextRegion> {
-    match rapid_detect_ort(full, det, rec, dict) {
+fn rapid_detect_regions(full: &RgbImage, det: &Path, rec: &Path, dict: &Path, script: OcrScript) -> Vec<TextRegion> {
+    match rapid_detect_ort(full, det, rec, dict, script) {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
-                "[rapid] det failed: {e} — no regions (rec unsupported, see ensure_rec_available)"
+                "[rapid] det failed: {e} — no regions"
             );
             Vec::new()
         }
@@ -179,6 +200,7 @@ fn rapid_detect_ort(
     det: &Path,
     rec: &Path,
     dict: &Path,
+    script: OcrScript,
 ) -> anyhow::Result<Vec<TextRegion>> {
     let (orig_w, orig_h) = (full.width(), full.height());
     // letterbox to 640 like YOLO
@@ -202,14 +224,23 @@ fn rapid_detect_ort(
             tensor[[0, 2, y as usize, x as usize]] = p[2] as f32 / 255.0;
         }
     }
-    let mut sess = Session::builder()?.commit_from_file(det)?;
+    let sess_arc = get_or_load_session(det)?;
     let input = Tensor::from_array(tensor)?;
-    let outputs = sess.run(ort::inputs![input])?;
-    let (_, val) = outputs
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no output"))?;
-    let (shape, data) = val.try_extract_tensor::<f32>()?;
+    
+    // Extract tensor data inside lock to avoid lifetime issues
+    let (shape_vec, data_vec): (Vec<i64>, Vec<f32>) = {
+        let mut sess = sess_arc.lock().map_err(|e| anyhow::anyhow!("session lock poisoned: {}", e))?;
+        let outputs = sess.run(ort::inputs![input])?;
+        let (_, val) = outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no output"))?;
+        let (shape, data) = val.try_extract_tensor::<f32>()?;
+        (shape.to_vec(), data.to_vec())
+    };
+    
+    let shape = &shape_vec;
+    let data = &data_vec;
     // shape e.g. [1,1,640,640] or [1,640,640]
     let h = if shape.len() >= 4 {
         shape[2] as usize
@@ -294,17 +325,66 @@ fn rapid_detect_ort(
             }
         }
     }
+    
+    // Trial-decode for Auto script
+    let (final_rec, final_dict) = if script == OcrScript::Auto {
+        if boxes.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Select sample boxes: largest 2-3 boxes by area
+        let mut boxes_with_area: Vec<([u32; 4], u32)> = boxes
+            .iter()
+            .map(|b| {
+                let area = (b[2] - b[0]) * (b[3] - b[1]);
+                (*b, area)
+            })
+            .collect();
+        boxes_with_area.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        let sample_boxes: Vec<[u32; 4]> = boxes_with_area
+            .iter()
+            .filter(|(_, area)| *area > 100)
+            .take(3)
+            .map(|(b, _)| *b)
+            .collect();
+        
+        if sample_boxes.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        let cache_dir = cache_dir_for("rapid");
+        let detected_script = trial_decode_language(full, &sample_boxes, &cache_dir);
+        
+        match detected_script {
+            Some(s) => {
+                if let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(s) {
+                    let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
+                    let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+                    (cache_dir.join(rec_name), cache_dir.join(dict_name))
+                } else {
+                    return Ok(Vec::new());
+                }
+            }
+            None => {
+                return Ok(Vec::new());
+            }
+        }
+    } else {
+        (rec.to_path_buf(), dict.to_path_buf())
+    };
+    
     // for each box try rec to get text; skip boxes we cannot read
     // (never emit placeholder text)
     let mut regs = Vec::new();
     for b in boxes {
-        if let Some(txt) = rapid_recognize_crop(full, b, rec, dict) {
+        if let Some(txt) = rapid_recognize_crop(full, b, &final_rec, &final_dict) {
             regs.push(TextRegion { bbox: b, text: txt });
         }
     }
     Ok(regs)
 }
-fn rapid_recognize_crop(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path) -> Option<String> {
+fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path) -> Option<(String, f32)> {
     let (x1, y1, x2, y2) = (bbox[0], bbox[1], bbox[2], bbox[3]);
     if x2 <= x1 || y2 <= y1 {
         return None;
@@ -353,12 +433,19 @@ fn rapid_recognize_crop(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path)
     let dict_chars: Vec<&str> = dict_content.lines().collect();
     let num_classes = dict_chars.len() + 1; // +1 for blank
     
-    // ORT session
-    let mut sess = Session::builder().ok()?.commit_from_file(rec).ok()?;
-    let input = Tensor::from_array(tensor).ok()?;
-    let outputs = sess.run(ort::inputs![input]).ok()?;
-    let (_, val) = outputs.into_iter().next()?;
-    let (shape, data) = val.try_extract_tensor::<f32>().ok()?;
+    // ORT session with cache - extract data inside lock
+    let (shape_vec, data_vec): (Vec<i64>, Vec<f32>) = {
+        let sess_arc = get_or_load_session(rec).ok()?;
+        let input = Tensor::from_array(tensor).ok()?;
+        let mut sess = sess_arc.lock().ok()?;
+        let outputs = sess.run(ort::inputs![input]).ok()?;
+        let (_, val) = outputs.into_iter().next()?;
+        let (shape, data) = val.try_extract_tensor::<f32>().ok()?;
+        (shape.to_vec(), data.to_vec())
+    };
+    
+    let shape = &shape_vec;
+    let data = &data_vec;
     
     // Shape typically [T, 1, num_classes] or [1, T, num_classes]
     let (t_steps, classes) = if shape.len() == 3 {
@@ -410,7 +497,8 @@ fn rapid_recognize_crop(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path)
     // Collapse: remove blank (0) and consecutive duplicates
     let mut result = String::new();
     let mut prev = None;
-    for &idx in &indices {
+    let mut valid_confidences = Vec::new();
+    for (i, &idx) in indices.iter().enumerate() {
         if idx == 0 {
             prev = None;
             continue;
@@ -421,14 +509,78 @@ fn rapid_recognize_crop(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path)
         prev = Some(idx);
         if idx > 0 && idx <= dict_chars.len() {
             result.push_str(dict_chars[idx - 1]);
+            valid_confidences.push(confidences[i]);
         }
     }
     
     if result.is_empty() {
         None
     } else {
-        Some(result)
+        let avg_conf = valid_confidences.iter().sum::<f32>() / valid_confidences.len() as f32;
+        Some((result, avg_conf))
     }
+}
+
+fn rapid_recognize_crop(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path) -> Option<String> {
+    rapid_recognize_crop_with_confidence(img, bbox, rec, dict).map(|(text, _conf)| text)
+}
+
+/// Trial-decode 2 sample crops with all available models, return best script.
+/// Returns None if all confidences below threshold (unreadable).
+fn trial_decode_language(
+    img: &RgbImage,
+    sample_boxes: &[[u32; 4]],
+    cache_dir: &Path,
+) -> Option<OcrScript> {
+    let scripts = [
+        OcrScript::English,
+        OcrScript::Japanese,
+        OcrScript::Korean,
+        OcrScript::Chinese,
+    ];
+    
+    let mut best_script = None;
+    let mut best_conf = 0.0;
+    
+    for script in scripts {
+        let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(script) else { continue };
+        let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
+        let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+        let rec = cache_dir.join(rec_name);
+        let dict = cache_dir.join(dict_name);
+        
+        if !rec.exists() || !dict.exists() {
+            continue;
+        }
+        
+        let mut total_conf = 0.0;
+        let mut count = 0;
+        
+        for bbox in sample_boxes.iter().take(2) {
+            if let Some((_text, conf)) = rapid_recognize_crop_with_confidence(img, *bbox, &rec, &dict) {
+                total_conf += conf;
+                count += 1;
+            }
+        }
+        
+        if count > 0 {
+            let avg_conf = total_conf / count as f32;
+            if avg_conf > best_conf {
+                best_conf = avg_conf;
+                best_script = Some(script);
+            }
+        }
+    }
+    
+    if best_conf < 0.3 {
+        eprintln!("[rapid-auto] all models low confidence ({:.2}), unreadable", best_conf);
+        return None;
+    }
+    
+    if let Some(s) = best_script {
+        eprintln!("[rapid-auto] detected {:?} (conf {:.2})", s, best_conf);
+    }
+    best_script
 }
 
 pub struct MangaOcr {
