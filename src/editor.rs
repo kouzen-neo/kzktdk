@@ -971,4 +971,11 @@ mod tests {
         let back = crate::metadata::load_page_metadata(&path).unwrap();
         assert_eq!(back.bubbles.len(), 1);
     }
+
+    #[test]
+    fn editor_session_is_send_for_tauri_state() {
+        fn assert_send<T: Send>() {}
+        assert_send::<EditorSession>();
+        assert_send::<crate::model::yolo::YoloModel>();
+    }
 }

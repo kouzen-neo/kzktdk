@@ -173,6 +173,38 @@ kzktdk translate "chapter_01.cbz" \
   --claude-model "claude-3-5-sonnet-20241022"
 ```
 
+### Translate to PDF
+
+PDF input is auto-detected; `--export pdf` packs translated pages into one PDF file (requires a native Pdfium library — see [docs/PDFIUM.md](docs/PDFIUM.md)):
+
+```bash
+kzktdk translate "chapter_01.cbz" --export pdf -o "chapter_01_id.pdf"
+kzktdk translate "chapter_01.pdf" -o "chapter_01_id.pdf" -t Indonesian
+```
+
+### Machine-Readable Progress (for scripts / GUI)
+
+```bash
+# JSONL phases per page on stderr + final summary as JSON on stdout
+kzktdk translate "./manga/chapter_01" -o out/ \
+  --progress jsonl --format json --quiet 2>progress.jsonl >summary.json
+
+# Resume: reuse good pages from a previous run, retranslate only failures
+kzktdk translate "./manga/chapter_01" -o out/ --retry-failed out/
+
+# Glossary: force fixed terms (JSON object: source -> required translation)
+kzktdk translate "./manga/chapter_01" -o out/ --glossary kamus.json
+```
+
+### Exit Codes
+
+| Code | Meaning |
+| :--- | :--- |
+| `0` | Success |
+| `2` | Invalid data (bad metadata/patch/mask/glossary/args) |
+| `1` | System error, or at least one page failed (original copied) |
+| `130` | Cancelled via Ctrl-C (in-flight page finished, queue aborted) |
+
 ### Inspection and Preprocessing Commands
 
 #### Speech Bubble Detection (Draw Bounding Boxes)
@@ -193,11 +225,16 @@ Usage: `kzktdk translate [OPTIONS] <INPUT>`
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `<INPUT>` | Path to image file (`.jpg`/`.png`/`.webp`), directory, or archive (`.cbz`/`.zip`) | *(Required)* |
+| `<INPUT>` | Path to image file (`.jpg`/`.png`/`.webp`), PDF (`.pdf`), directory, or archive (`.cbz`/`.zip`) | *(Required)* |
 | `-o, --output <PATH>` | Output destination file, directory, or archive | Auto |
-| `--export <FORMAT>` | Batch output format: `auto`, `cbz`, or `folder` | `auto` |
+| `--export <FORMAT>` | Batch output format: `auto`, `cbz`, `folder`, or `pdf` | `auto` |
 | `-t, --target-lang <LANG>` | Target language for dialogue translation | `English` |
 | `--prompt <PROMPT>` | Custom prompt instructions or additional translation rules | - |
+| `--glossary <PATH>` | JSON term map (`source -> required translation`) enforced on output | - |
+| `--progress <MODE>` | Per-phase progress on stderr: `text` or `jsonl` | `text` |
+| `--format <FORMAT>` | Final summary on stdout: `text` or `json` | `text` |
+| `--quiet` | Human logs to stderr (keep stdout machine-clean) | off |
+| `--retry-failed <DIR>` | Reuse good pages from a previous run, retranslate only failures | - |
 | `--batch-size <N>` | Number of dialogue bubbles to batch per LLM translation request | `15` |
 | `-p, --provider <PROVIDER>`| LLM provider: `gemini`, `openai`, `ollama`, or `claude` | `gemini` |
 | `--gemini-key <KEY>` | Gemini API key (or set `GEMINI_API_KEY`) | - |
@@ -236,3 +273,6 @@ Interested in contributing? Read the complete architecture and development guide
 ## Documentation
 
 For technical architecture, mathematical formulations, and algorithmic details, see [DOCUMENTATION.md](DOCUMENTATION.md).
+GUI integrators start at [DOCUMENTATION.md §7 (GUI Contract)](DOCUMENTATION.md).
+PDF library setup per OS: [docs/PDFIUM.md](docs/PDFIUM.md).
+Planned GPU acceleration: [docs/GPU_ROADMAP.md](docs/GPU_ROADMAP.md).

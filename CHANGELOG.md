@@ -13,6 +13,64 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.1.1-dev.16] - 2026-09-10
+
+Branch: `dev-kz-debug`
+
+### Added
+- **YOLO `Send` terbukti + model pool**: `send_tests` (`yolo.rs`, `editor.rs`)
+  membuktikan `ort::Session`/`YoloModel`/`EditorSession: Send` saat kompilasi.
+  Path paralel `translate` memuat **satu model per worker** (`pool_size =
+  min(jobs, pages)`, checkout pop/push via `std::Mutex`, tak pernah ditahan
+  lintas-await) alih-alih satu load per halaman. Terukur (release):
+  `YoloModel::new` ~205–215ms steady (~340ms load pertama); chapter 20
+  halaman/8 worker menghemat ±(20−8)×0,21s ≈ 2,5s + lonjakan memori.
+  Diverifikasi live: 4 halaman `jobs=2` tanpa deadlock, ringkasan `done` benar.
+- **Pipeline pindah ke lib** (`src/pipeline.rs`): `TranslationContext` +
+  `build_provider` + `translate_page` keluar dari biner CLI agar bisa dipakai
+  ulang GUI; perilaku CLI identik (`events: None`). `TranslationContext`
+  mendapat field opsional `events: Option<&dyn Fn(PageEvent) + Send + Sync>`;
+  bila di-set, semua output terminal ditekan dan fase
+  (`detect_end/translate_end/render_end`) disalurkan via callback.
+  Tipe event bersama: `pipeline::PageEvent { idx, total, page, phase, error }`.
+- **Tauri batch translate**: `tauri::{TranslateConfig (..Default..),
+  ProgressEvent (= PageEvent), PageResult, editor_translate_batch}` —
+  sekuensial, satu model YOLO, runtime current-thread internal, tanpa
+  `println!`/exit. Validasi setup (gambar/provider/glossary/model/font)
+  mengembalikan `Err` sebelum halaman berjalan; kegagalan per halaman
+  menyalin original (paritas CLI) + event terminal `done`/`failed`.
+  Catatan: callback butuh `Send + Sync` (bukan hanya `Send`) karena dipakai
+  bersama lewat `TranslationContext.events` yang harus `Send` untuk path
+  paralel CLI.
+- **PDF**: `scripts/verify_pdf.sh` (resolusi lib + `pdf_roundtrip_or_skip`,
+  banner `PDF_OK`/`PDF_SKIP`, tanpa LLM/jaringan) + `docs/PDFIUM.md` (tabel
+  per OS, sumber build `bblanchon/pdfium-binaries`, setup `PDFIUM_LIB_PATH`,
+  verifikasi). Di mesin ini: `PDF_SKIP` + perintah PDF gagal graceful
+  (exit 1 + pesan, terverifikasi).
+- **Docs**: `README.md` (tabel opsi `translate`: `--glossary/--progress/`
+  `--format/--quiet/--retry-failed/--export pdf`, contoh PDF + JSONL +
+  `--format json`, tabel Exit Codes, tautan `§7`/`PDFIUM.md`/`GPU_ROADMAP.md`),
+  `DOCUMENTATION.md §6` menautkan `docs/PDFIUM.md` + skrip verifikasi.
+- **Riset (tanpa implementasi)**: `docs/GPU_ROADMAP.md` (cargo feature +
+  `with_execution_providers` per `ort` 2.0: CUDA/TensorRT/DirectML/CoreML,
+  dependensi per OS, fallback CPU wajib) + `docs/UPDATE_ROADMAP.md`
+  (`tauri-plugin-updater` v2: signing, artefak, `latest.json` via
+  `tauri-action`, penamaan artefak jangan diubah).
+- **Tests**: `tests/tauri_batch.rs` (7 test, gate `--features tauri`;
+  tanpa feature jadi 0 test): defaults, empty/missing-image/unknown-provider/
+  glossary-bad/model-missing ditolak, plus e2e offline (model lokal +
+  endpoint LLM port-tertutup) `detect_end` → `failed` + original tersalin.
+  Total: 14 unit + 11 kontrak CLI + 7 tauri, hijau; `clippy --all-targets`
+  0 error dengan/tanpa feature.
+
+### Changed
+- `Cargo.toml` versi tetap `0.1.0` (praktik repo: dev ditandai changelog).
+- Komentar basi "create per task via model_file clone" diperbarui.
+- `tauri.rs`: helper font `load_font_bytes()` dipakai bersama
+  `session_for()` + fungsi batch.
+
+---
+
 ## [0.1.1-dev.15] - 2026-09-10
 
 Branch: `dev-kz-debug`

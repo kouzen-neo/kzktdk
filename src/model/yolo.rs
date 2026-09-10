@@ -426,3 +426,19 @@ impl YoloModel {
         result
     }
 }
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    /// Compile-time proof that the ONNX session can be shared across threads
+    /// (required for the YOLO model pool in batch translate and for Tauri
+    /// managed state). Fails to compile if `ort::Session` ever loses `Send`.
+    #[test]
+    fn ort_session_and_yolo_model_are_send() {
+        assert_send::<ort::session::Session>();
+        assert_send::<YoloModel>();
+    }
+}

@@ -131,6 +131,7 @@ PDF input/output is implemented in `src/archive.rs` via the `pdfium-render` crat
 - **Input**: `prepare_input()` accepts `.pdf` → pages are rendered to PNG (`page_0001.png`, target width 1600px) in a `TempDir`, then flow through the normal batch pipeline (`PreparedInput::Batch { is_pdf: true, ... }`).
 - **Output**: `translate --export pdf` (or auto when input is PDF / `-o` ends in `.pdf`) packs translated pages with `create_pdf()` — one full-page image per page, page size = image pixels as points, JPEG quality 90. Default name: `<stem>_translated.pdf`.
 - **Native library resolution** (`bind_pdfium()`): `PDFIUM_LIB_PATH` env var → system library (`libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`). Without it, PDF commands fail with a descriptive error (exit 1), never a panic.
+- Setup per OS + verification: `docs/PDFIUM.md`, `./scripts/verify_pdf.sh` (prints `PDF_OK` / `PDF_SKIP`).
 - `detect` / `metadata export` also accept PDF input (pages become batch images).
 
 ---
