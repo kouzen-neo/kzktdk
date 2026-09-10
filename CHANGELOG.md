@@ -60,8 +60,28 @@ Branch: `dev-kz-debug`
   tanpa feature jadi 0 test): defaults, empty/missing-image/unknown-provider/
   glossary-bad/model-missing ditolak, plus e2e offline (model lokal +
   endpoint LLM port-tertutup) `detect_end` → `failed` + original tersalin.
-  Total: 14 unit + 11 kontrak CLI + 7 tauri, hijau; `clippy --all-targets`
+  `tests/cli_contract.rs` +2 regression hermetik (tanpa key): `translate
+  --export pdf` menghasilkan file (bukan direktori), dan stdout
+  `--format json --quiet` tetap JSON murni saat cache hit.
+  Total: 14 unit + 13 kontrak CLI + 7 tauri, hijau; `clippy --all-targets`
   0 error dengan/tanpa feature.
+
+### Fixed (hasil uji live Gemini + PDF)
+- **PDF double-bind**: `bind_pdfium()` (`src/archive.rs`) gagal dengan
+  `PdfiumLibraryBindingsAlreadyInitialized` pada penggunaan PDF kedua dalam
+  satu proses (input PDF + `--export pdf`, round-trip test). Kini handle
+  di-cache sekali per proses (`once_cell::sync::OnceCell<Pdfium: Send+Sync>`,
+  dep `once_cell` baru — sudah ada di tree). `pdf_roundtrip_or_skip` lolos
+  nyata (`PDF_OK`) dengan libpdfium `bblanchon/pdfium-binaries`.
+- **`--export pdf -o file.pdf` membuat direktori** `file.pdf`
+  (`create_dir_all(temp_output_dir)`), lalu packing gagal `IsADirectory`.
+  Kini arsip PDF memakai tempdir seperti CBZ; `-o` hanya menamai file akhir.
+- **Cache-hit mencemari stdout**: `[Cache Hit]` memakai `println!`
+  unconditional sehingga stdout `--format json` bukan JSON murni. Kini lewat
+  `tinfo!` (stderr saat `--quiet`), dan `tinfo!` bungkam total dalam mode
+  event GUI. Diverifikasi: run ulang PDF tersaji dari cache, stdout murni.
+- Uji live: ZIP 5/5 halaman + PDF 5 halaman → Indonesia via
+  `gemini-3.1-flash-lite`, exit 0, PDF 5 halaman valid.
 
 ### Changed
 - `Cargo.toml` versi tetap `0.1.0` (praktik repo: dev ditandai changelog).

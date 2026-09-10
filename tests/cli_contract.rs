@@ -379,3 +379,105 @@ fn pdf_input_rejected_clearly_without_libpdfium() {
         );
     }
 }
+
+#[test]
+fn translate_pdf_export_writes_file_not_dir() {
+    // Regression: `--export pdf -o out.pdf` used to create_dir_all(out.pdf),
+    // so packing failed with IsADirectory. Needs YOLO (skip if absent);
+    // needs no LLM keys: the closed-port endpoint fails fast, pages fall
+    // back to originals, packing still runs.
+    let model = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/kzkt.onnx");
+    if !model.is_file() {
+        eprintln!("SKIP translate_pdf_export_writes_file_not_dir: model absent");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let inp = dir.path().join("in");
+    std::fs::create_dir_all(&inp).unwrap();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_inpainted.png");
+    if fixture.is_file() {
+        std::fs::copy(&fixture, inp.join("p.png")).unwrap();
+    } else {
+        // Fallback synthetic page when the local fixture is absent.
+        let img = image::RgbImage::from_pixel(300, 300, image::Rgb([255, 255, 255]));
+        img.save(inp.join("p.png")).unwrap();
+    }
+    let out_pdf = dir.path().join("out.pdf");
+    let (code, _, stderr) = run(&[
+        "translate",
+        s(&inp),
+        "-o",
+        s(&out_pdf),
+        "--export",
+        "pdf",
+        "--provider",
+        "ollama",
+        "--openai-base-url",
+        "http://127.0.0.1:9/v1",
+        "--openai-model",
+        "nope",
+        "-m",
+        s(&model),
+        "--jobs",
+        "1",
+        "--no-cache",
+    ]);
+    if !out_pdf.is_file() && stderr.to_lowercase().contains("pdfium") {
+        eprintln!("SKIP translate_pdf_export_writes_file_not_dir: no Pdfium library");
+        return;
+    }
+    assert!(
+        out_pdf.is_file(),
+        "code={} expected out.pdf file, stderr:\n{}",
+        code,
+        stderr
+    );
+    assert!(!out_pdf.is_dir());
+}
+
+#[test]
+fn translate_format_json_stdout_stays_pure() {
+    // Second run hits the translation cache; cache-hit lines must go to
+    // stderr (tinfo), never pollute the stdout JSON summary.
+    let model = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/kzkt.onnx");
+    if !model.is_file() {
+        eprintln!("SKIP translate_format_json_stdout_stays_pure: model absent");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let inp = dir.path().join("in");
+    std::fs::create_dir_all(&inp).unwrap();
+    let mut img = image::RgbImage::from_pixel(300, 300, image::Rgb([255, 255, 255]));
+    for y in 40..120 {
+        for x in 40..260 {
+            img.put_pixel(x, y, image::Rgb([10, 10, 10]));
+        }
+    }
+    img.save(inp.join("p.png")).unwrap();
+    for pass in 0..2 {
+        let out = dir.path().join(format!("out{}", pass));
+        let (code, stdout, _) = run(&[
+            "translate",
+            s(&inp),
+            "-o",
+            s(&out),
+            "--provider",
+            "ollama",
+            "--openai-base-url",
+            "http://127.0.0.1:9/v1",
+            "--openai-model",
+            "nope",
+            "-m",
+            s(&model),
+            "--jobs",
+            "1",
+            "--format",
+            "json",
+            "--quiet",
+        ]);
+        let _ = code; // pages fail (no LLM) -> exit 1; contract is about stdout.
+        serde_json::from_str::<serde_json::Value>(&stdout).unwrap_or_else(|e| {
+            panic!("pass {} stdout not pure JSON: {}\n---\n{}", pass, e, stdout)
+        });
+    }
+}

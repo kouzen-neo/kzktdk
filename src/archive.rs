@@ -225,26 +225,36 @@ pub fn create_cbz(image_paths: &[PathBuf], output_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Binds the Pdfium native library.
+/// Process-wide Pdfium handle (`Pdfium: Send + Sync`).
+/// The native library can only be bound once per process: a second
+/// `bind_to_library` fails with `PdfiumLibraryBindingsAlreadyInitialized`.
+/// Without this cache, any run touching PDF twice (e.g. PDF input +
+/// `--export pdf`, or the round-trip test) would break on the second bind.
+static PDFIUM: once_cell::sync::OnceCell<pdfium_render::prelude::Pdfium> =
+    once_cell::sync::OnceCell::new();
+
+/// Binds the Pdfium native library (once per process; reused afterwards).
 ///
 /// Resolution order: `PDFIUM_LIB_PATH` env var -> system library.
 /// Returns a descriptive error when no library is found (see DOCUMENTATION.md).
-fn bind_pdfium() -> Result<pdfium_render::prelude::Pdfium> {
+fn bind_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium> {
     use pdfium_render::prelude::Pdfium;
-    if let Ok(custom) = std::env::var("PDFIUM_LIB_PATH") {
-        let bindings = Pdfium::bind_to_library(custom.clone()).with_context(|| {
-            format!(
-                "Failed to load Pdfium from PDFIUM_LIB_PATH={:?}. Install libpdfium for your platform (see DOCUMENTATION.md).",
-                custom
-            )
+    PDFIUM.get_or_try_init(|| {
+        if let Ok(custom) = std::env::var("PDFIUM_LIB_PATH") {
+            let bindings = Pdfium::bind_to_library(custom.clone()).with_context(|| {
+                format!(
+                    "Failed to load Pdfium from PDFIUM_LIB_PATH={:?}. Install libpdfium for your platform (see DOCUMENTATION.md).",
+                    custom
+                )
+            })?;
+            return Ok(Pdfium::new(bindings));
+        }
+        let bindings = Pdfium::bind_to_system_library().with_context(|| {
+            "Pdfium library not found. Install libpdfium (Linux: libpdfium.so, macOS: libpdfium.dylib, Windows: pdfium.dll) or set PDFIUM_LIB_PATH to its full path. See DOCUMENTATION.md."
+                .to_string()
         })?;
-        return Ok(Pdfium::new(bindings));
-    }
-    let bindings = Pdfium::bind_to_system_library().with_context(|| {
-        "Pdfium library not found. Install libpdfium (Linux: libpdfium.so, macOS: libpdfium.dylib, Windows: pdfium.dll) or set PDFIUM_LIB_PATH to its full path. See DOCUMENTATION.md."
-            .to_string()
-    })?;
-    Ok(Pdfium::new(bindings))
+        Ok(Pdfium::new(bindings))
+    })
 }
 
 /// Renders each PDF page to a PNG (~200 DPI target width) in a temp dir.

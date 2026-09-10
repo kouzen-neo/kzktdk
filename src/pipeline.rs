@@ -133,7 +133,7 @@ pub async fn translate_page(
     let verbose = !(jsonl || ctx.quiet) && !silent_events;
     macro_rules! tinfo {
         ($($t:tt)*) => {
-            if verbose { println!($($t)*) } else { eprintln!($($t)*) }
+            if verbose { println!($($t)*) } else if !silent_events { eprintln!($($t)*) }
         };
     }
     let emit = |phase: &'static str| {
@@ -324,8 +324,8 @@ pub async fn translate_page(
             model_name,
             ctx.prompt_sig,
         );
-        if !cached.is_empty() && !silent_events {
-            println!(
+        if !cached.is_empty() {
+            tinfo!(
                 "      [Cache Hit] {}/{} from cache",
                 cached.len(),
                 crops.len()

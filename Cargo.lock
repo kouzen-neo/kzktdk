@@ -1518,6 +1518,7 @@ dependencies = [
  "inpaint",
  "natord",
  "ndarray 0.17.2",
+ "once_cell",
  "ort",
  "pdfium-render",
  "rayon",

@@ -1502,7 +1502,9 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                    let temp_output_dir = if export_as_cbz {
+                    let temp_output_dir = if export_as_cbz || export_as_pdf {
+                        // Archive outputs (CBZ/PDF) are packed from page images at
+                        // the end; `-o` names the final file, not a folder.
                         tempfile::tempdir()?.keep()
                     } else if let Some(ref out) = output {
                         out.clone()
