@@ -130,109 +130,7 @@ Examples:
   kzktdk translate \"page_01.jpg\" -o \"page_01_translated.jpg\"
   kzktdk translate \"chapter_01.cbz\" --provider ollama --openai-base-url \"http://localhost:11434/v1\" --openai-model \"llama3.2-vision\"
   kzktdk translate \"chapter.cbz\" --fallback-provider openai --rate-limit 3 --jobs auto")]
-    Translate {
-        /// Input path: image (.jpg/.png/.webp), folder, or comic archive (.cbz/.zip/.epub/.pdf)
-        input: Option<PathBuf>,
-        /// Output path (image file, folder, or .cbz file)
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-        /// Export format: 'folder', 'cbz', 'pdf', or 'auto' (defaults to 'auto')
-        #[arg(long, default_value = "auto")]
-        export: String,
-        /// ONNX model path
-        #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_PATH)]
-        model: PathBuf,
-        /// Target translation language
-        #[arg(short, long, default_value_t = kzktdk::config::DEFAULT_TARGET_LANG.to_string())]
-        target_lang: String,
-        /// Custom prompt instructions or additional translation rules
-        #[arg(long)]
-        prompt: Option<String>,
-        /// Number of dialogue bubbles to batch per LLM translation request
-        #[arg(long, default_value_t = kzktdk::config::DEFAULT_CLI_BATCH_SIZE)]
-        batch_size: usize,
-        /// LLM Provider: gemini, openai, ollama, or claude
-        #[arg(short, long, default_value_t = kzktdk::config::DEFAULT_PROVIDER.to_string())]
-        provider: String,
-        /// Fallback providers comma-separated (e.g. openai,claude)
-        #[arg(long)]
-        fallback_provider: Option<String>,
-        /// Rate limit RPS
-        #[arg(long, default_value_t = kzktdk::config::DEFAULT_RATE_LIMIT_RPS)]
-        rate_limit: u32,
-        /// Jobs for batch parallel: auto or number (default auto = num_cpus)
-        #[arg(long, default_value_t = kzktdk::config::DEFAULT_JOBS.to_string())]
-        jobs: String,
-        /// Disable translation cache
-        #[arg(long)]
-        no_cache: bool,
-        /// Clear translation cache and exit
-        #[arg(long)]
-        clear_cache: bool,
-        /// Gemini API Key (or set GEMINI_API_KEY env var)
-        #[arg(long, env = "GEMINI_API_KEY")]
-        gemini_key: Option<String>,
-        /// OpenAI API Key (or set OPENAI_API_KEY env var)
-        #[arg(long, env = "OPENAI_API_KEY")]
-        openai_key: Option<String>,
-        /// OpenAI base URL (use for Ollama e.g. http://localhost:11434/v1)
-        #[arg(long, default_value_t = kzktdk::config::OPENAI_DEFAULT_BASE_URL.to_string())]
-        openai_base_url: String,
-        /// Model name for OpenAI / Ollama
-        #[arg(long, default_value_t = kzktdk::config::DEFAULT_OPENAI_MODEL.to_string())]
-        openai_model: String,
-        /// Model name for Gemini
-        #[arg(long, default_value_t = kzktdk::config::DEFAULT_GEMINI_MODEL.to_string())]
-        gemini_model: String,
-        /// Claude API Key (or set ANTHROPIC_API_KEY env var)
-        #[arg(long, env = "ANTHROPIC_API_KEY")]
-        claude_key: Option<String>,
-        /// Model name for Claude
-        #[arg(long, default_value_t = kzktdk::config::DEFAULT_CLAUDE_MODEL.to_string())]
-        claude_model: String,
-        /// Primary comic font (default: Komika Axis like KZKT mobile)
-        #[arg(short, long, default_value = kzktdk::config::DEFAULT_FONT_PATH)]
-        font: PathBuf,
-        /// Secondary / CJK font for non-Latin text (default: KosugiMaru)
-        #[arg(long, default_value = kzktdk::config::DEFAULT_CJK_FONT_PATH)]
-        cjk_font: PathBuf,
-        /// Save metadata sidecar .kedit.json per page + project.kedit.json
-        #[arg(long)]
-        save_metadata: bool,
-        /// Custom metadata directory (default: same as output)
-        #[arg(long)]
-        metadata_dir: Option<PathBuf>,
-        /// OCR engine: none (default), rapid (JP/EN/KR/CN+auto), tesseract, manga (deprecated) — pluggable (tesseract needs its binary)
-        #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "rapid", "manga", "tesseract", "vision", "local"]))]
-        ocr: String,
-        /// Translate freetext outside bubbles (requires --ocr rapid|manga|tesseract)
-        #[arg(long, default_value_t = false)]
-        translate_free_text: bool,
-        /// OCR script: auto|jp|en|kr|cn (default jp = JAPANESE+Latin)
-        #[arg(long, default_value = "jp")]
-        ocr_script: String,
-        /// Translation mode: vision (mosaic), ocr (text-only), auto (ocr fallback vision)
-        #[arg(long, default_value = "vision", value_parser = clap::builder::PossibleValuesParser::new(["vision", "ocr", "auto"]))]
-        mode: String,
-        /// Custom OCR model path override (else auto-download ~/.cache/kzktdk/models/<engine>/)
-        #[arg(long)]
-        ocr_model: Option<PathBuf>,
-        /// Glossary file: JSON object mapping source term -> required translation
-        #[arg(long)]
-        glossary: Option<PathBuf>,
-        /// Progress output: text or jsonl (JSON lines to stderr)
-        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "jsonl"]))]
-        progress: String,
-        /// Machine-readable final summary format: text or json (JSON to stdout)
-        #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
-        format: String,
-        /// Suppress informational logs (data goes to stdout, logs to stderr)
-        #[arg(long, default_value_t = false)]
-        quiet: bool,
-        /// Retry only failed pages from a previous output folder (skip pages with good output)
-        #[arg(long)]
-        retry_failed: Option<PathBuf>,
-    },
+    Translate(TranslateArgs),
 
     /// Metadata operations for editor backend
     Metadata {
@@ -247,7 +145,113 @@ Examples:
     },
 }
 
+#[derive(clap::Args, Debug, Clone)]
+pub struct TranslateArgs {
+    /// Input path: image (.jpg/.png/.webp), folder, or comic archive (.cbz/.zip/.epub/.pdf)
+    pub input: Option<PathBuf>,
+    /// Output path (image file, folder, or .cbz file)
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+    /// Export format: 'folder', 'cbz', 'pdf', or 'auto' (defaults to 'auto')
+    #[arg(long, default_value = "auto")]
+    pub export: String,
+    /// ONNX model path
+    #[arg(short, long, default_value = kzktdk::config::DEFAULT_MODEL_PATH)]
+    pub model: PathBuf,
+    /// Target translation language
+    #[arg(short, long, default_value_t = kzktdk::config::DEFAULT_TARGET_LANG.to_string())]
+    pub target_lang: String,
+    /// Custom prompt instructions or additional translation rules
+    #[arg(long)]
+    pub prompt: Option<String>,
+    /// Number of dialogue bubbles to batch per LLM translation request
+    #[arg(long, default_value_t = kzktdk::config::DEFAULT_CLI_BATCH_SIZE)]
+    pub batch_size: usize,
+    /// LLM Provider: gemini, openai, ollama, or claude
+    #[arg(short, long, default_value_t = kzktdk::config::DEFAULT_PROVIDER.to_string())]
+    pub provider: String,
+    /// Fallback providers comma-separated (e.g. openai,claude)
+    #[arg(long)]
+    pub fallback_provider: Option<String>,
+    /// Rate limit RPS
+    #[arg(long, default_value_t = kzktdk::config::DEFAULT_RATE_LIMIT_RPS)]
+    pub rate_limit: u32,
+    /// Jobs for batch parallel: auto or number (default auto = num_cpus)
+    #[arg(long, default_value_t = kzktdk::config::DEFAULT_JOBS.to_string())]
+    pub jobs: String,
+    /// Disable translation cache
+    #[arg(long)]
+    pub no_cache: bool,
+    /// Clear translation cache and exit
+    #[arg(long)]
+    pub clear_cache: bool,
+    /// Gemini API Key (or set GEMINI_API_KEY env var)
+    #[arg(long, env = "GEMINI_API_KEY")]
+    pub gemini_key: Option<String>,
+    /// OpenAI API Key (or set OPENAI_API_KEY env var)
+    #[arg(long, env = "OPENAI_API_KEY")]
+    pub openai_key: Option<String>,
+    /// OpenAI base URL (use for Ollama e.g. http://localhost:11434/v1)
+    #[arg(long, default_value_t = kzktdk::config::OPENAI_DEFAULT_BASE_URL.to_string())]
+    pub openai_base_url: String,
+    /// Model name for OpenAI / Ollama
+    #[arg(long, default_value_t = kzktdk::config::DEFAULT_OPENAI_MODEL.to_string())]
+    pub openai_model: String,
+    /// Model name for Gemini
+    #[arg(long, default_value_t = kzktdk::config::DEFAULT_GEMINI_MODEL.to_string())]
+    pub gemini_model: String,
+    /// Claude API Key (or set ANTHROPIC_API_KEY env var)
+    #[arg(long, env = "ANTHROPIC_API_KEY")]
+    pub claude_key: Option<String>,
+    /// Model name for Claude
+    #[arg(long, default_value_t = kzktdk::config::DEFAULT_CLAUDE_MODEL.to_string())]
+    pub claude_model: String,
+    /// Primary comic font (default: Komika Axis like KZKT mobile)
+    #[arg(short, long, default_value = kzktdk::config::DEFAULT_FONT_PATH)]
+    pub font: PathBuf,
+    /// Secondary / CJK font for non-Latin text (default: KosugiMaru)
+    #[arg(long, default_value = kzktdk::config::DEFAULT_CJK_FONT_PATH)]
+    pub cjk_font: PathBuf,
+    /// Save metadata sidecar .kedit.json per page + project.kedit.json
+    #[arg(long)]
+    pub save_metadata: bool,
+    /// Custom metadata directory (default: same as output)
+    #[arg(long)]
+    pub metadata_dir: Option<PathBuf>,
+    /// OCR engine: none (default), rapid (JP/EN/KR/CN+auto), tesseract, manga (deprecated) — pluggable (tesseract needs its binary)
+    #[arg(long, default_value = "none", value_parser = clap::builder::PossibleValuesParser::new(["none", "rapid", "manga", "tesseract", "vision", "local"]))]
+    pub ocr: String,
+    /// Translate freetext outside bubbles (requires --ocr rapid|manga|tesseract)
+    #[arg(long, default_value_t = false)]
+    pub translate_free_text: bool,
+    /// OCR script: auto|jp|en|kr|cn (default jp = JAPANESE+Latin)
+    #[arg(long, default_value = "jp")]
+    pub ocr_script: String,
+    /// Translation mode: vision (mosaic), ocr (text-only), auto (ocr fallback vision)
+    #[arg(long, default_value = "vision", value_parser = clap::builder::PossibleValuesParser::new(["vision", "ocr", "auto"]))]
+    pub mode: String,
+    /// Custom OCR model path override (else auto-download ~/.cache/kzktdk/models/<engine>/)
+    #[arg(long)]
+    pub ocr_model: Option<PathBuf>,
+    /// Glossary file: JSON object mapping source term -> required translation
+    #[arg(long)]
+    pub glossary: Option<PathBuf>,
+    /// Progress output: text or jsonl (JSON lines to stderr)
+    #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "jsonl"]))]
+    pub progress: String,
+    /// Machine-readable final summary format: text or json (JSON to stdout)
+    #[arg(long, default_value = "text", value_parser = clap::builder::PossibleValuesParser::new(["text", "json"]))]
+    pub format: String,
+    /// Suppress informational logs (data goes to stdout, logs to stderr)
+    #[arg(long, default_value_t = false)]
+    pub quiet: bool,
+    /// Retry only failed pages from a previous output folder (skip pages with good output)
+    #[arg(long)]
+    pub retry_failed: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum MetadataCmd {
     /// Export detections to JSON without LLM (cheap)
     Export {

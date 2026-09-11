@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, bail};
-use image::GenericImageView;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -195,7 +194,6 @@ pub fn prepare_input(input_path: &Path) -> Result<PreparedInput> {
 }
 
 /// Creates a CBZ (ZIP) archive from a list of images.
-
 pub fn create_cbz(image_paths: &[PathBuf], output_path: &Path) -> Result<()> {
     if image_paths.is_empty() {
         bail!("No images to pack into CBZ");
@@ -268,7 +266,7 @@ pub fn extract_pdf_pages(pdf_path: &Path) -> Result<(Vec<PathBuf>, TempDir)> {
         .load_pdf_from_file(pdf_path, None)
         .with_context(|| format!("Failed to open PDF: {}", pdf_path.display()))?;
     let pages = doc.pages();
-    if pages.len() == 0 {
+    if pages.is_empty() {
         bail!("PDF has no pages: {}", pdf_path.display());
     }
     let mut images = Vec::new();

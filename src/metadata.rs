@@ -248,27 +248,26 @@ fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
             let bak = path.with_extension(format!("bak.{}", ts));
             let _ = std::fs::copy(path, &bak);
             // Prune old backups keep 3
-            if let Some(parent) = path.parent() {
-                if let Some(stem) = path.file_name().and_then(|s| s.to_str()) {
-                    if let Ok(entries) = std::fs::read_dir(parent) {
-                        let mut baks: Vec<_> = entries
-                            .filter_map(|e| e.ok())
-                            .filter(|e| {
-                                e.file_name()
-                                    .to_str()
-                                    .map(|n| n.starts_with(&format!("{}.bak.", stem)))
-                                    .unwrap_or(false)
-                            })
-                            .collect();
-                        baks.sort_by_key(|e| e.path());
-                        while baks.len() > 3 {
-                            if let Some(old) = baks.first() {
-                                let _ = std::fs::remove_file(old.path());
-                                baks.remove(0);
-                            } else {
-                                break;
-                            }
-                        }
+            if let Some(parent) = path.parent()
+                && let Some(stem) = path.file_name().and_then(|s| s.to_str())
+                && let Ok(entries) = std::fs::read_dir(parent)
+            {
+                let mut baks: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with(&format!("{}.bak.", stem)))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                baks.sort_by_key(|e| e.path());
+                while baks.len() > 3 {
+                    if let Some(old) = baks.first() {
+                        let _ = std::fs::remove_file(old.path());
+                        baks.remove(0);
+                    } else {
+                        break;
                     }
                 }
             }
@@ -323,6 +322,7 @@ pub fn load_project(project_path: &Path) -> Result<Project> {
 }
 
 /// Build PageEditData from detections + translations
+#[allow(clippy::too_many_arguments)]
 pub fn build_page_data(
     page_name: &str,
     width: u32,

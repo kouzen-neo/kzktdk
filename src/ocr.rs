@@ -2,9 +2,9 @@ use image::{DynamicImage, RgbImage, imageops::FilterType};
 use ndarray::Array4;
 use ort::session::Session;
 use ort::value::Tensor;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::collections::HashMap;
 
 // ---------- Session cache ----------
 
@@ -13,12 +13,14 @@ static SESSION_CACHE: OnceLock<Mutex<HashMap<String, Arc<Mutex<Session>>>>> = On
 fn get_or_load_session(path: &Path) -> anyhow::Result<Arc<Mutex<Session>>> {
     let cache = SESSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = path.to_string_lossy().to_string();
-    
-    let mut lock = cache.lock().map_err(|e| anyhow::anyhow!("cache lock poisoned: {}", e))?;
+
+    let mut lock = cache
+        .lock()
+        .map_err(|e| anyhow::anyhow!("cache lock poisoned: {}", e))?;
     if let Some(sess) = lock.get(&key) {
         return Ok(Arc::clone(sess));
     }
-    
+
     let sess = Session::builder()?.commit_from_file(path)?;
     let wrapped = Arc::new(Mutex::new(sess));
     lock.insert(key, Arc::clone(&wrapped));
@@ -146,12 +148,12 @@ pub struct RapidOcr {
 impl OcrEngine for RapidOcr {
     fn recognize(&self, image: &RgbImage, bbox: [u32; 4]) -> Option<String> {
         // if real model present, try ort rec; never guess
-        if let (Some(rec), Some(dict)) = (&self.rec_path, &self.dict_path) {
-            if rec.exists() && dict.exists() {
-                if let Some(s) = rapid_recognize_crop(image, bbox, rec, dict) {
-                    return Some(s);
-                }
-            }
+        if let (Some(rec), Some(dict)) = (&self.rec_path, &self.dict_path)
+            && rec.exists()
+            && dict.exists()
+            && let Some(s) = rapid_recognize_crop(image, bbox, rec, dict)
+        {
+            return Some(s);
         }
         warn_rec_stub_once("rapid");
         None
@@ -162,12 +164,13 @@ impl OcrEngine for RapidOcr {
         }
         if let (Some(det), Some(rec), Some(dict)) =
             (&self.det_path, &self.rec_path, &self.dict_path)
+            && det.exists()
+            && rec.exists()
+            && dict.exists()
         {
-            if det.exists() && rec.exists() && dict.exists() {
-                let regs = rapid_detect_regions(full, det, rec, dict, self.script);
-                if !regs.is_empty() {
-                    return regs;
-                }
+            let regs = rapid_detect_regions(full, det, rec, dict, self.script);
+            if !regs.is_empty() {
+                return regs;
             }
         }
         // No models (or empty detection): honest empty, never fake boxes.
@@ -178,13 +181,17 @@ impl OcrEngine for RapidOcr {
     }
 }
 
-fn rapid_detect_regions(full: &RgbImage, det: &Path, rec: &Path, dict: &Path, script: OcrScript) -> Vec<TextRegion> {
+fn rapid_detect_regions(
+    full: &RgbImage,
+    det: &Path,
+    rec: &Path,
+    dict: &Path,
+    script: OcrScript,
+) -> Vec<TextRegion> {
     match rapid_detect_ort(full, det, rec, dict, script) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!(
-                "[rapid] det failed: {e} — no regions"
-            );
+            eprintln!("[rapid] det failed: {e} — no regions");
             Vec::new()
         }
     }
@@ -220,10 +227,12 @@ fn rapid_detect_ort(
     }
     let sess_arc = get_or_load_session(det)?;
     let input = Tensor::from_array(tensor)?;
-    
+
     // Extract tensor data inside lock to avoid lifetime issues
     let (shape_vec, data_vec): (Vec<i64>, Vec<f32>) = {
-        let mut sess = sess_arc.lock().map_err(|e| anyhow::anyhow!("session lock poisoned: {}", e))?;
+        let mut sess = sess_arc
+            .lock()
+            .map_err(|e| anyhow::anyhow!("session lock poisoned: {}", e))?;
         let outputs = sess.run(ort::inputs![input])?;
         let (_, val) = outputs
             .into_iter()
@@ -232,7 +241,7 @@ fn rapid_detect_ort(
         let (shape, data) = val.try_extract_tensor::<f32>()?;
         (shape.to_vec(), data.to_vec())
     };
-    
+
     let shape = &shape_vec;
     let data = &data_vec;
     // shape e.g. [1,1,640,640] or [1,640,640]
@@ -252,25 +261,25 @@ fn rapid_detect_ort(
     };
     // find boxes via threshold >0.3
     let thresh = 0.3f32;
-    let mut mask = vec![vec![false; w]; h];
-    for y in 0..h {
-        for x in 0..w {
-            let idx = y * w + x;
-            if idx < data.len() && data[idx] > thresh {
-                mask[y][x] = true;
-            }
+    let total_pixels = w * h;
+    let mut mask = vec![false; total_pixels];
+    let limit = total_pixels.min(data.len());
+    for i in 0..limit {
+        if data[i] > thresh {
+            mask[i] = true;
         }
     }
     // connected components BFS 4-dir
-    let mut visited = vec![vec![false; w]; h];
+    let mut visited = vec![false; total_pixels];
     let mut boxes: Vec<[u32; 4]> = Vec::new();
     for y in 0..h {
         for x in 0..w {
-            if !mask[y][x] || visited[y][x] {
+            let start_idx = y * w + x;
+            if !mask[start_idx] || visited[start_idx] {
                 continue;
             }
             let mut q = vec![(y, x)];
-            visited[y][x] = true;
+            visited[start_idx] = true;
             let (mut minx, mut miny, mut maxx, mut maxy) = (x, y, x, y);
             let mut qi = 0;
             while qi < q.len() {
@@ -285,10 +294,11 @@ fn rapid_detect_ort(
                     if ny >= h || nx >= w {
                         continue;
                     }
-                    if !mask[ny][nx] || visited[ny][nx] {
+                    let nidx = ny * w + nx;
+                    if !mask[nidx] || visited[nidx] {
                         continue;
                     }
-                    visited[ny][nx] = true;
+                    visited[nidx] = true;
                     q.push((ny, nx));
                     minx = minx.min(nx);
                     miny = miny.min(ny);
@@ -319,13 +329,13 @@ fn rapid_detect_ort(
             }
         }
     }
-    
+
     // Trial-decode for Auto script
     let (final_rec, final_dict) = if script == OcrScript::Auto {
         if boxes.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Select sample boxes: largest 2-3 boxes by area
         let mut boxes_with_area: Vec<([u32; 4], u32)> = boxes
             .iter()
@@ -334,27 +344,27 @@ fn rapid_detect_ort(
                 (*b, area)
             })
             .collect();
-        boxes_with_area.sort_by(|a, b| b.1.cmp(&a.1));
-        
+        boxes_with_area.sort_by_key(|(_, area)| std::cmp::Reverse(*area));
+
         let sample_boxes: Vec<[u32; 4]> = boxes_with_area
             .iter()
             .filter(|(_, area)| *area > 100)
             .take(3)
             .map(|(b, _)| *b)
             .collect();
-        
+
         if sample_boxes.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         let cache_dir = cache_dir_for("rapid");
         let detected_script = trial_decode_language(full, &sample_boxes, &cache_dir);
-        
+
         match detected_script {
             Some(s) => {
                 if let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(s) {
-                    let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
-                    let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+                    let rec_name = rec_url.split('/').next_back().unwrap_or("rec.onnx");
+                    let dict_name = dict_url.split('/').next_back().unwrap_or("dict.txt");
                     (cache_dir.join(rec_name), cache_dir.join(dict_name))
                 } else {
                     return Ok(Vec::new());
@@ -367,7 +377,7 @@ fn rapid_detect_ort(
     } else {
         (rec.to_path_buf(), dict.to_path_buf())
     };
-    
+
     // for each box try rec to get text; skip boxes we cannot read
     // (never emit placeholder text)
     let mut regs = Vec::new();
@@ -378,7 +388,12 @@ fn rapid_detect_ort(
     }
     Ok(regs)
 }
-fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Path, dict: &Path) -> Option<(String, f32)> {
+fn rapid_recognize_crop_with_confidence(
+    img: &RgbImage,
+    bbox: [u32; 4],
+    rec: &Path,
+    dict: &Path,
+) -> Option<(String, f32)> {
     let (x1, y1, x2, y2) = (bbox[0], bbox[1], bbox[2], bbox[3]);
     if x2 <= x1 || y2 <= y1 {
         return None;
@@ -388,29 +403,29 @@ fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Pa
     if w < 4 || h < 4 {
         return None;
     }
-    
+
     // Crop
     let crop = image::imageops::crop_imm(img, x1, y1, w, h).to_image();
-    
+
     // Check if vertical (tategaki): rotate 90 degrees
     let crop = if h > w {
         image::imageops::rotate90(&crop)
     } else {
         crop
     };
-    
+
     // Resize to height 32, keep aspect ratio, pad right
     let (cw, ch) = (crop.width(), crop.height());
     let target_h = 32u32;
     let scale = target_h as f32 / ch as f32;
     let new_w = (cw as f32 * scale).round() as u32;
     let resized = image::imageops::resize(&crop, new_w, target_h, FilterType::Triangle);
-    
+
     // Pad to at least 32 width (common models accept variable width, but normalize)
     let padded_w = new_w.max(32);
     let mut padded = RgbImage::from_pixel(padded_w, target_h, image::Rgb([255, 255, 255]));
     image::imageops::overlay(&mut padded, &resized, 0, 0);
-    
+
     // Normalize to [0,1] with mean/std 0.5 (simple normalization for now)
     let mut tensor = ndarray::Array4::<f32>::zeros((1, 3, target_h as usize, padded_w as usize));
     for y in 0..target_h {
@@ -421,12 +436,12 @@ fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Pa
             }
         }
     }
-    
+
     // Load dict
     let dict_content = std::fs::read_to_string(dict).ok()?;
     let dict_chars: Vec<&str> = dict_content.lines().collect();
     let num_classes = dict_chars.len() + 1; // +1 for blank
-    
+
     // ORT session with cache - extract data inside lock
     let (shape_vec, data_vec): (Vec<i64>, Vec<f32>) = {
         let sess_arc = get_or_load_session(rec).ok()?;
@@ -437,10 +452,10 @@ fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Pa
         let (shape, data) = val.try_extract_tensor::<f32>().ok()?;
         (shape.to_vec(), data.to_vec())
     };
-    
+
     let shape = &shape_vec;
     let data = &data_vec;
-    
+
     // Shape typically [T, 1, num_classes] or [1, T, num_classes]
     let (t_steps, classes) = if shape.len() == 3 {
         if shape[1] == 1 {
@@ -453,28 +468,24 @@ fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Pa
     } else {
         return None;
     };
-    
+
     // Assert compatibility
     if classes != num_classes {
         eprintln!(
             "[rapid] dict/model mismatch: dict {} + blank = {}, model output = {}",
-            dict_chars.len(), num_classes, classes
+            dict_chars.len(),
+            num_classes,
+            classes
         );
         return None;
     }
-    
+
     // CTC decode: argmax + collapse
     let mut indices = Vec::new();
     let mut confidences = Vec::new();
     for t in 0..t_steps {
-        let offset = if shape.len() == 3 && shape[1] == 1 {
-            t * classes
-        } else if shape.len() == 3 {
-            t * classes
-        } else {
-            t * classes
-        };
-        
+        let offset = t * classes;
+
         let mut max_idx = 0;
         let mut max_val = data[offset];
         for c in 1..classes {
@@ -487,7 +498,7 @@ fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Pa
         indices.push(max_idx);
         confidences.push(max_val);
     }
-    
+
     // Collapse: remove blank (0) and consecutive duplicates
     let mut result = String::new();
     let mut prev = None;
@@ -506,7 +517,7 @@ fn rapid_recognize_crop_with_confidence(img: &RgbImage, bbox: [u32; 4], rec: &Pa
             valid_confidences.push(confidences[i]);
         }
     }
-    
+
     if result.is_empty() {
         None
     } else {
@@ -532,31 +543,35 @@ fn trial_decode_language(
         OcrScript::Korean,
         OcrScript::Chinese,
     ];
-    
+
     let mut best_script = None;
     let mut best_conf = 0.0;
-    
+
     for script in scripts {
-        let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(script) else { continue };
-        let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
-        let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+        let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(script) else {
+            continue;
+        };
+        let rec_name = rec_url.split('/').next_back().unwrap_or("rec.onnx");
+        let dict_name = dict_url.split('/').next_back().unwrap_or("dict.txt");
         let rec = cache_dir.join(rec_name);
         let dict = cache_dir.join(dict_name);
-        
+
         if !rec.exists() || !dict.exists() {
             continue;
         }
-        
+
         let mut total_conf = 0.0;
         let mut count = 0;
-        
+
         for bbox in sample_boxes.iter().take(2) {
-            if let Some((_text, conf)) = rapid_recognize_crop_with_confidence(img, *bbox, &rec, &dict) {
+            if let Some((_text, conf)) =
+                rapid_recognize_crop_with_confidence(img, *bbox, &rec, &dict)
+            {
                 total_conf += conf;
                 count += 1;
             }
         }
-        
+
         if count > 0 {
             let avg_conf = total_conf / count as f32;
             if avg_conf > best_conf {
@@ -565,12 +580,15 @@ fn trial_decode_language(
             }
         }
     }
-    
+
     if best_conf < 0.3 {
-        eprintln!("[rapid-auto] all models low confidence ({:.2}), unreadable", best_conf);
+        eprintln!(
+            "[rapid-auto] all models low confidence ({:.2}), unreadable",
+            best_conf
+        );
         return None;
     }
-    
+
     if let Some(s) = best_script {
         eprintln!("[rapid-auto] detected {:?} (conf {:.2})", s, best_conf);
     }
@@ -670,34 +688,34 @@ fn tesseract_tsv_regions(img: &RgbImage, lang: &str) -> Vec<TextRegion> {
         .output();
     let _ = std::fs::remove_file(&path);
     let mut regs = Vec::new();
-    if let Ok(o) = out {
-        if o.status.success() {
-            let txt = String::from_utf8_lossy(&o.stdout);
-            for line in txt.lines().skip(1) {
-                let cols: Vec<&str> = line.split('\t').collect();
-                if cols.len() < 12 {
-                    continue;
-                }
-                let conf: i32 = cols[10].parse().unwrap_or(-1);
-                if conf < 30 {
-                    continue;
-                }
-                let text = cols[11].trim();
-                if text.is_empty() {
-                    continue;
-                }
-                let x: u32 = cols[6].parse().unwrap_or(0);
-                let y: u32 = cols[7].parse().unwrap_or(0);
-                let w: u32 = cols[8].parse().unwrap_or(0);
-                let h: u32 = cols[9].parse().unwrap_or(0);
-                if w < 12 || h < 8 {
-                    continue;
-                }
-                regs.push(TextRegion {
-                    bbox: [x, y, x + w, y + h],
-                    text: text.to_string(),
-                });
+    if let Ok(o) = out
+        && o.status.success()
+    {
+        let txt = String::from_utf8_lossy(&o.stdout);
+        for line in txt.lines().skip(1) {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() < 12 {
+                continue;
             }
+            let conf: i32 = cols[10].parse().unwrap_or(-1);
+            if conf < 30 {
+                continue;
+            }
+            let text = cols[11].trim();
+            if text.is_empty() {
+                continue;
+            }
+            let x: u32 = cols[6].parse().unwrap_or(0);
+            let y: u32 = cols[7].parse().unwrap_or(0);
+            let w: u32 = cols[8].parse().unwrap_or(0);
+            let h: u32 = cols[9].parse().unwrap_or(0);
+            if w < 12 || h < 8 {
+                continue;
+            }
+            regs.push(TextRegion {
+                bbox: [x, y, x + w, y + h],
+                text: text.to_string(),
+            });
         }
     }
     // cluster nearby words into lines via merge handled in preparer; return raw
@@ -742,7 +760,10 @@ fn download_file(url: &str, dst: &Path) -> bool {
     false
 }
 
-fn ensure_rapid_cached(custom_path: Option<&Path>, script: OcrScript) -> Option<(PathBuf, PathBuf, PathBuf)> {
+fn ensure_rapid_cached(
+    custom_path: Option<&Path>,
+    script: OcrScript,
+) -> Option<(PathBuf, PathBuf, PathBuf)> {
     if let Some(p) = custom_path {
         if p.exists() {
             return Some((p.to_path_buf(), p.to_path_buf(), p.to_path_buf()));
@@ -752,26 +773,31 @@ fn ensure_rapid_cached(custom_path: Option<&Path>, script: OcrScript) -> Option<
     let dir = cache_dir_for("rapid");
     let _ = std::fs::create_dir_all(&dir);
     let det = dir.join("ch_PP-OCRv3_det_infer.onnx");
-    
+
     // For auto, download all supported scripts
     let scripts_to_download = if script == OcrScript::Auto {
-        vec![OcrScript::English, OcrScript::Japanese, OcrScript::Korean, OcrScript::Chinese]
+        vec![
+            OcrScript::English,
+            OcrScript::Japanese,
+            OcrScript::Korean,
+            OcrScript::Chinese,
+        ]
     } else {
         vec![script]
     };
-    
+
     if !det.exists() {
         let det_url = crate::config::RAPIDOCR_DET_URL;
         let _ = download_file(det_url, &det);
     }
-    
+
     for s in scripts_to_download {
         if let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(s) {
-            let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
-            let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+            let rec_name = rec_url.split('/').next_back().unwrap_or("rec.onnx");
+            let dict_name = dict_url.split('/').next_back().unwrap_or("dict.txt");
             let rec = dir.join(rec_name);
             let dict = dir.join(dict_name);
-            
+
             if !rec.exists() {
                 eprintln!("[OCR] downloading {:?} rec model...", s);
                 let _ = download_file(rec_url, &rec);
@@ -781,25 +807,25 @@ fn ensure_rapid_cached(custom_path: Option<&Path>, script: OcrScript) -> Option<
             }
         }
     }
-    
+
     // Return paths for the requested script (or first available if auto)
     let target_script = if script == OcrScript::Auto {
         OcrScript::Japanese
     } else {
         script
     };
-    
+
     if let Some((rec_url, dict_url)) = crate::config::rapid_model_urls(target_script) {
-        let rec_name = rec_url.split('/').last().unwrap_or("rec.onnx");
-        let dict_name = dict_url.split('/').last().unwrap_or("dict.txt");
+        let rec_name = rec_url.split('/').next_back().unwrap_or("rec.onnx");
+        let dict_name = dict_url.split('/').next_back().unwrap_or("dict.txt");
         let rec = dir.join(rec_name);
         let dict = dir.join(dict_name);
-        
+
         if det.exists() && rec.exists() && dict.exists() {
             return Some((det, rec, dict));
         }
     }
-    
+
     None
 }
 
@@ -811,41 +837,38 @@ fn ensure_model_cached(engine: &str, custom_path: Option<&Path>) -> Option<PathB
         eprintln!("[OCR] custom --ocr-model {:?} not found, fallback cache", p);
     }
     let dir = cache_dir_for(engine);
-    if dir.exists() {
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension()
-                    .map(|e| e.eq_ignore_ascii_case("onnx"))
-                    .unwrap_or(false)
-                {
-                    return Some(p);
-                }
-                if p.is_dir() {
-                    if let Ok(rd2) = std::fs::read_dir(&p) {
-                        for e2 in rd2.flatten() {
-                            let pp = e2.path();
-                            if pp
-                                .extension()
-                                .map(|e| e.eq_ignore_ascii_case("onnx"))
-                                .unwrap_or(false)
-                            {
-                                return Some(pp);
-                            }
-                        }
+    if dir.exists()
+        && let Ok(rd) = std::fs::read_dir(&dir)
+    {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension()
+                .map(|e| e.eq_ignore_ascii_case("onnx"))
+                .unwrap_or(false)
+            {
+                return Some(p);
+            }
+            if p.is_dir()
+                && let Ok(rd2) = std::fs::read_dir(&p)
+            {
+                for e2 in rd2.flatten() {
+                    let pp = e2.path();
+                    if pp
+                        .extension()
+                        .map(|e| e.eq_ignore_ascii_case("onnx"))
+                        .unwrap_or(false)
+                    {
+                        return Some(pp);
                     }
                 }
             }
         }
     }
-    match engine {
-        "rapid" => {
-            eprintln!(
-                "[OCR] rapid model not cached at {:?} — expected det+rec .onnx (SWHL/RapidOCR). Run with --ocr-model <path> or place model.",
-                dir
-            );
-        }
-        _ => {}
+    if engine == "rapid" {
+        eprintln!(
+            "[OCR] rapid model not cached at {:?} — expected det+rec .onnx (SWHL/RapidOCR). Run with --ocr-model <path> or place model.",
+            dir
+        );
     }
     let _ = std::fs::create_dir_all(&dir);
     None
@@ -915,7 +938,10 @@ mod tests {
         assert!(ensure_rec_available("rapid", OcrScript::Japanese).is_ok());
         assert!(ensure_rec_available("rapid", OcrScript::ChineseTraditional).is_err());
         let e = ensure_rec_available("rapid", OcrScript::ChineseTraditional).unwrap_err();
-        assert!(e.to_string().contains("not yet supported"), "unexpected: {e}");
+        assert!(
+            e.to_string().contains("not yet supported"),
+            "unexpected: {e}"
+        );
     }
 
     #[test]
@@ -941,7 +967,7 @@ mod tests {
         assert!(rapid_model_urls(OcrScript::Chinese).is_some());
         assert!(rapid_model_urls(OcrScript::ChineseTraditional).is_none());
         assert!(rapid_model_urls(OcrScript::Auto).is_none());
-        
+
         let (rec, dict) = rapid_model_urls(OcrScript::Japanese).unwrap();
         assert!(rec.contains("japan_rec_crnn.onnx"));
         assert!(dict.contains("japan_dict.txt"));

@@ -586,10 +586,10 @@ pub fn apply_patch(data: &mut PageEditData, patch: &EditPatch) -> (Vec<String>, 
 fn resolve_font_bytes(name: &str) -> Option<Vec<u8>> {
     if crate::font::FontRegistry::resolve(name).is_ok() {
         let list = crate::font::FontRegistry::list();
-        if let Some(info) = list.iter().find(|f| f.name == name) {
-            if let Ok(b) = std::fs::read(&info.path) {
-                return Some(b);
-            }
+        if let Some(info) = list.iter().find(|f| f.name == name)
+            && let Ok(b) = std::fs::read(&info.path)
+        {
+            return Some(b);
         }
         // Embedded fallback still resolves; load embedded bytes.
         if name.eq_ignore_ascii_case("Komika Axis") || name.eq_ignore_ascii_case("komika") {
@@ -732,20 +732,19 @@ impl EditorSession {
                 conf: b.conf,
             };
             let fam = b.style.as_ref().and_then(|s| s.font_family.as_deref());
-            if let Some(fname) = fam {
-                if let Some(bytes) = resolve_font_bytes(fname) {
-                    if let Ok(ts) = Typesetter::new(&bytes, self.cjk_bytes.as_deref()) {
-                        ts.render_bubble_text_with_style(
-                            &mut rgb,
-                            &det,
-                            &b.translated,
-                            Some(&data.target_lang),
-                            None,
-                            b.style.as_ref(),
-                        );
-                        continue;
-                    }
-                }
+            if let Some(fname) = fam
+                && let Some(bytes) = resolve_font_bytes(fname)
+                && let Ok(ts) = Typesetter::new(&bytes, self.cjk_bytes.as_deref())
+            {
+                ts.render_bubble_text_with_style(
+                    &mut rgb,
+                    &det,
+                    &b.translated,
+                    Some(&data.target_lang),
+                    None,
+                    b.style.as_ref(),
+                );
+                continue;
             }
             global.render_bubble_text_with_style(
                 &mut rgb,
@@ -808,20 +807,19 @@ impl EditorSession {
         } else {
             bubble.style.as_ref()
         };
-        if let Some(fname) = style_ref.and_then(|s| s.font_family.as_deref()) {
-            if let Some(bytes) = resolve_font_bytes(fname) {
-                if let Ok(ts) = Typesetter::new(&bytes, self.cjk_bytes.as_deref()) {
-                    ts.render_bubble_text_with_style(
-                        &mut rgb,
-                        &det,
-                        text,
-                        Some(&data.target_lang),
-                        None,
-                        style_ref,
-                    );
-                    return Ok(rgb);
-                }
-            }
+        if let Some(fname) = style_ref.and_then(|s| s.font_family.as_deref())
+            && let Some(bytes) = resolve_font_bytes(fname)
+            && let Ok(ts) = Typesetter::new(&bytes, self.cjk_bytes.as_deref())
+        {
+            ts.render_bubble_text_with_style(
+                &mut rgb,
+                &det,
+                text,
+                Some(&data.target_lang),
+                None,
+                style_ref,
+            );
+            return Ok(rgb);
         }
         let global = Typesetter::new(&self.font_bytes, self.cjk_bytes.as_deref())?;
         global.render_bubble_text_with_style(

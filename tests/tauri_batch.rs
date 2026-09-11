@@ -83,8 +83,10 @@ fn unknown_provider_is_rejected() {
     image::RgbImage::from_pixel(64, 64, image::Rgb([255, 255, 255]))
         .save(&png)
         .unwrap();
-    let mut c = TranslateConfig::default();
-    c.provider = "watson".to_string();
+    let c = TranslateConfig {
+        provider: "watson".to_string(),
+        ..Default::default()
+    };
     let r = editor_translate_batch(
         vec![png.to_str().unwrap().to_string()],
         dir.path().join("out").to_str().unwrap(),
@@ -256,16 +258,19 @@ fn hostile_inputs_fail_gracefully_never_panic() {
 
 #[test]
 fn stub_ocr_rec_is_rejected_before_model_load() {
-    // Fase-4: freetext/mode-ocr with a stub engine is a setup Err
+    // Fase-4: freetext/mode-ocr with an unsupported engine/script is a setup Err
     // (hermetic: 0-byte image passes the is_file check, guard fires first).
     let dir = tempfile::tempdir().unwrap();
     let png = dir.path().join("p.png");
     std::fs::write(&png, b"").unwrap();
     for (freetext, mode) in [(true, "vision"), (false, "ocr")] {
-        let mut c = TranslateConfig::default();
-        c.ocr = "rapid".to_string();
-        c.translate_free_text = freetext;
-        c.mode = mode.to_string();
+        let c = TranslateConfig {
+            ocr: "rapid".to_string(),
+            ocr_script: "cht".to_string(),
+            translate_free_text: freetext,
+            mode: mode.to_string(),
+            ..Default::default()
+        };
         let r = editor_translate_batch(
             vec![png.to_str().unwrap().to_string()],
             dir.path().join("out").to_str().unwrap(),
@@ -274,7 +279,7 @@ fn stub_ocr_rec_is_rejected_before_model_load() {
         );
         let e = r.unwrap_err();
         assert!(
-            e.contains("not implemented"),
+            e.contains("not yet supported") || e.contains("Traditional"),
             "freetext={freetext} mode={mode}: unexpected: {e}"
         );
     }

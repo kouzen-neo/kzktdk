@@ -180,6 +180,19 @@ pub enum Provider {
     },
 }
 
+static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+pub fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(20))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 impl Provider {
     pub fn name(&self) -> &str {
         match self {
@@ -208,7 +221,7 @@ impl Provider {
         let base64_image =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &jpeg_bytes);
 
-        let client = reqwest::Client::new();
+        let client = http_client();
 
         let response_text = match self {
             Provider::Gemini { api_key, model } => {
@@ -359,7 +372,7 @@ impl Provider {
 
     /// Text-only translation for JSON repair
     pub async fn translate_text(&self, text: &str, prompt: &str) -> Result<String> {
-        let client = reqwest::Client::new();
+        let client = http_client();
         let full_prompt = format!("{}\n\nInput:\n{}", prompt, text);
         match self {
             Provider::Gemini { api_key, model } => {
@@ -578,13 +591,11 @@ pub async fn translate_with_chain(
                         );
                         if let Some(repaired) =
                             repair_json_output(prov, &raw, target_lang, rate_limiter, verbose).await
+                            && let Ok(map) = parse_translation_json(&repaired)
+                            && !map.is_empty()
                         {
-                            if let Ok(map) = parse_translation_json(&repaired) {
-                                if !map.is_empty() {
-                                    cinfo!("  [Repair] {} repair succeeded", prov.name());
-                                    return Ok(map);
-                                }
-                            }
+                            cinfo!("  [Repair] {} repair succeeded", prov.name());
+                            return Ok(map);
                         }
                         cinfo!(
                             "  [Failover] {} failed (unparseable). Trying next provider...",

@@ -14,6 +14,27 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.2.1] - 2026-09-11
+
+**Performance & Code Quality**: 3x bubble detection acceleration, HTTP connection pooling, OCR allocation optimizations, and metadata god-function deconstruction.
+
+### Performance & Optimization
+- **YOLO 3x Detection Acceleration** (`src/model/yolo.rs`): Memisahkan eksekusi ONNX `session.run` ke dalam `forward(&mut self, prepared)` dan decoding multi-skala `decode_detections(...)`. Deteksi balon dialog kini hanya melakukan **1 kali** forward pass alih-alih 3 kali.
+- **HTTP Connection Pooling** (`src/translation/mod.rs`): Mengganti inisialisasi `reqwest::Client::new()` per request pada `translate_mosaic_raw` dan `translate_text` dengan static connection pool `OnceLock<reqwest::Client>` (timeout 120s, connect timeout 20s).
+- **OCR Heap Allocations Reduction** (`src/ocr.rs`): Mengganti alokasi matriks 2D `vec![vec![false; w]; h]` pada deteksi text box heatmap dengan flat 1D vector `vec![false; w * h]`, mengeliminasi ~1.280 alokasi heap per halaman.
+
+### Refactoring & Architecture
+- **Dekomposisi Metadata God Function** (`src/cli/metadata.rs`): Memecah fungsi `run` 1.442 baris monolitik menjadi 9 fungsi terisolasi (`run_export`, `run_render`, `run_edit`, `run_validate`, `run_preview`, `run_show`, `run_pack`, `run_mask`, `run_watch`).
+- **Ekstraksi Argumen CLI** (`src/cli/args.rs`, `src/main.rs`, `src/cli/translate.rs`): Mengekstrak 34 inlined fields `Commands::Translate` menjadi struct mandiri `TranslateArgs` dan menyederhanakan 75 baris argumen unpacking di `main.rs` menjadi 1 baris bersih.
+- **Sentralisasi Magic Numbers Luminansi** (`src/inpaint/mod.rs`): Mengekstrak koefisien luminansi ITU-R BT.601 (`LUM_R`, `LUM_G`, `LUM_B`) dan ambang batas inpainting ke konstanta bernama dengan fungsi pembantu `rgb_to_lum_f64` dan `rgb_to_lum_u8`.
+
+### Dead Code & Bug Fixes
+- **Deduplikasi Cek Folder**: Menghapus duplikasi pengecekan `if !input.is_dir()` di `metadata pack`.
+- **Pembersihan Variabel Tak Terpakai**: Menghapus variabel `mtimes`/`mt` di `metadata watch` dan `what` di pipeline/translate.
+- **Perbaikan Regresi Test & Clippy**: Memperbaiki unit test `stub_ocr_rec_is_rejected_before_model_load` pada `tests/tauri_batch.rs` untuk script `cht`, memperbaiki struct update syntax, dan memastikan nol peringatan clippy (`cargo clippy --all-targets --features tauri -- -D warnings`).
+
+---
+
 ## [0.2.0] - 2026-09-11
 
 **Major release**: Rapid OCR 5-language implementation + full editor backend + Tauri bindings.

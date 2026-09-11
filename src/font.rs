@@ -172,10 +172,10 @@ impl FontRegistry {
 
     fn load_registry() -> FontRegistryFile {
         let path = registry_path();
-        if let Ok(file) = std::fs::File::open(&path) {
-            if let Ok(reg) = serde_json::from_reader(file) {
-                return reg;
-            }
+        if let Ok(file) = std::fs::File::open(&path)
+            && let Ok(reg) = serde_json::from_reader(file)
+        {
+            return reg;
         }
         FontRegistryFile::default()
     }
@@ -196,10 +196,10 @@ impl FontRegistry {
 impl AppConfig {
     pub fn load() -> Self {
         let path = config_path();
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(cfg) = toml::from_str(&content) {
-                return cfg;
-            }
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(cfg) = toml::from_str(&content)
+        {
+            return cfg;
         }
         Self::default()
     }

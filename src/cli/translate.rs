@@ -13,45 +13,47 @@ use kzktdk::model::yolo::YoloModel;
 use kzktdk::pipeline::{TranslationContext, build_provider, translate_page};
 use kzktdk::translation::{ProviderChain, RateLimiter};
 
+use super::args::TranslateArgs;
 use super::util::{ensure_model, parse_jobs};
 
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    input: Option<PathBuf>,
-    output: Option<PathBuf>,
-    export: String,
-    model: PathBuf,
-    target_lang: String,
-    prompt: Option<String>,
-    batch_size: usize,
-    provider: String,
-    fallback_provider: Option<String>,
-    rate_limit: u32,
-    jobs: String,
-    no_cache: bool,
-    clear_cache: bool,
-    gemini_key: Option<String>,
-    openai_key: Option<String>,
-    openai_base_url: String,
-    openai_model: String,
-    gemini_model: String,
-    claude_key: Option<String>,
-    claude_model: String,
-    font: PathBuf,
-    cjk_font: PathBuf,
-    save_metadata: bool,
-    metadata_dir: Option<PathBuf>,
-    ocr: String,
-    translate_free_text: bool,
-    ocr_script: String,
-    mode: String,
-    ocr_model: Option<PathBuf>,
-    glossary: Option<PathBuf>,
-    progress: String,
-    format: String,
-    quiet: bool,
-    retry_failed: Option<PathBuf>,
-) -> Result<()> {
+pub async fn run(args: TranslateArgs) -> Result<()> {
+    let TranslateArgs {
+        input,
+        output,
+        export,
+        model,
+        target_lang,
+        prompt,
+        batch_size,
+        provider,
+        fallback_provider,
+        rate_limit,
+        jobs,
+        no_cache,
+        clear_cache,
+        gemini_key,
+        openai_key,
+        openai_base_url,
+        openai_model,
+        gemini_model,
+        claude_key,
+        claude_model,
+        font,
+        cjk_font,
+        save_metadata,
+        metadata_dir,
+        ocr,
+        translate_free_text,
+        ocr_script,
+        mode,
+        ocr_model,
+        glossary,
+        progress,
+        format,
+        quiet,
+        retry_failed,
+    } = args;
+
     let jsonl = progress == "jsonl";
     let as_json = format == "json";
     let verbose = !(jsonl || quiet);
@@ -69,15 +71,8 @@ pub async fn run(
     // Validate mode/ocr_script early
     let ocr_script_enum = kzktdk::ocr::OcrScript::from_key(&ocr_script);
     // Fail fast: stub OCR engines cannot read text (never guess).
-    if translate_free_text || mode == "ocr" {
-        let what = if translate_free_text {
-            "--translate-free-text"
-        } else {
-            "--mode ocr"
-        };
-        if ocr != "none" {
-            kzktdk::ocr::ensure_rec_available(&ocr, ocr_script_enum)?;
-        }
+    if (translate_free_text || mode == "ocr") && ocr != "none" {
+        kzktdk::ocr::ensure_rec_available(&ocr, ocr_script_enum)?;
     }
     let _ = mode.clone();
     let _ = ocr_script_enum;
@@ -277,7 +272,7 @@ pub async fn run(
                 cache: cache_opt.as_deref(),
                 save_metadata,
                 metadata_dir: metadata_dir.clone(),
-                translate_free_text: translate_free_text.clone(),
+                translate_free_text,
                 ocr: ocr.clone(),
                 ocr_script: ocr_script_enum,
                 mode: mode.clone(),
@@ -304,21 +299,21 @@ pub async fn run(
                 skipped: false,
                 err: None,
             };
-            if let Some(ref rdir) = retry_failed {
-                if let Some(prev) = retry_hit(rdir, img_path.file_name().unwrap_or_default()) {
-                    if let Some(parent) = out_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::copy(&prev, &out_path)?;
-                    rec.skipped = true;
-                    tinfo!("    [Retry] Reusing previous output {:?}", prev);
+            if let Some(ref rdir) = retry_failed
+                && let Some(prev) = retry_hit(rdir, img_path.file_name().unwrap_or_default())
+            {
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent)?;
                 }
+                std::fs::copy(&prev, &out_path)?;
+                rec.skipped = true;
+                tinfo!("    [Retry] Reusing previous output {:?}", prev);
             }
-            if !rec.skipped {
-                if let Err(e) = translate_page(&img_path, &out_path, &mut yolo, &ctx).await {
-                    rec.ok = false;
-                    rec.err = Some(e.to_string());
-                }
+            if !rec.skipped
+                && let Err(e) = translate_page(&img_path, &out_path, &mut yolo, &ctx).await
+            {
+                rec.ok = false;
+                rec.err = Some(e.to_string());
             }
 
             // Save project.kedit.json for single image if requested
@@ -421,7 +416,7 @@ pub async fn run(
                     cache: cache_opt.as_deref(),
                     save_metadata,
                     metadata_dir: metadata_dir.clone(),
-                    translate_free_text: translate_free_text.clone(),
+                    translate_free_text,
                     ocr: ocr.clone(),
                     ocr_script: ocr_script_enum,
                     mode: mode.clone(),
@@ -469,15 +464,15 @@ pub async fn run(
                         skipped: false,
                         err: None,
                     };
-                    if let Some(ref rdir) = retry_failed {
-                        if let Some(prev) = retry_hit(rdir, file_name) {
-                            let _ = std::fs::copy(&prev, &target_path);
-                            rec.skipped = true;
-                            tinfo!("    [Retry] Reusing previous output {:?}", prev);
-                            translated_files.push(target_path);
-                            records.push(rec);
-                            continue;
-                        }
+                    if let Some(ref rdir) = retry_failed
+                        && let Some(prev) = retry_hit(rdir, file_name)
+                    {
+                        let _ = std::fs::copy(&prev, &target_path);
+                        rec.skipped = true;
+                        tinfo!("    [Retry] Reusing previous output {:?}", prev);
+                        translated_files.push(target_path);
+                        records.push(rec);
+                        continue;
                     }
                     if let Err(e) = translate_page(file_path, &target_path, &mut yolo, &ctx).await {
                         eprintln!(
@@ -584,7 +579,7 @@ pub async fn run(
                 let use_cache_flag = cache_opt.is_some();
                 let save_meta_flag = save_metadata;
                 let meta_dir_opt = metadata_dir.clone();
-                let translate_free_text_c = translate_free_text.clone();
+                let translate_free_text_c = translate_free_text;
                 let ocr_c = ocr.clone();
                 let ocr_script_c = ocr_script_enum;
                 let mode_c = mode.clone();
@@ -631,11 +626,10 @@ pub async fn run(
                     let claude_key_c = claude_key_c.clone();
                     let claude_model_c = claude_model_c.clone();
                     let fallback_str_c = fallback_str_c.clone();
-                    let save_meta_flag = save_meta_flag;
                     let meta_dir_opt = meta_dir_opt.clone();
-                    let translate_free_text_c2 = translate_free_text_c.clone();
+                    let translate_free_text_c2 = translate_free_text_c;
                     let ocr_c2 = ocr_c.clone();
-                    let ocr_script_c2 = ocr_script_c.clone();
+                    let ocr_script_c2 = ocr_script_c;
                     let mode_c2 = mode_c.clone();
                     let ocr_model_c2 = ocr_model_c.clone();
                     let glossary_c2 = glossary_c.clone();
@@ -663,11 +657,11 @@ pub async fn run(
                             }
                         };
                         // --retry-failed: reuse previous good output without loading models.
-                        if let Some(ref rdir) = retry_c2 {
-                            if let Some(prev) = retry_hit(rdir, file_name.as_os_str()) {
-                                let _ = std::fs::copy(&prev, &target_path);
-                                return (target_path, idx, true, None, true);
-                            }
+                        if let Some(ref rdir) = retry_c2
+                            && let Some(prev) = retry_hit(rdir, file_name.as_os_str())
+                        {
+                            let _ = std::fs::copy(&prev, &target_path);
+                            return (target_path, idx, true, None, true);
                         }
                         // Rebuild chain per task (cheap). A bad provider name
                         // fails the page gracefully instead of panicking.

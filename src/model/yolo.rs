@@ -207,15 +207,8 @@ impl YoloModel {
         }
     }
 
-    /// Predicts detections using a single (conf, iou) threshold pair.
-    pub fn predict(
-        &mut self,
-        orig_w: u32,
-        orig_h: u32,
-        conf_threshold: f32,
-        iou_threshold: f32,
-        prepared: &PreparedInput,
-    ) -> Result<Vec<Detection>> {
+    /// Runs the ONNX forward pass on prepared input and returns raw output floats.
+    pub fn forward(&mut self, prepared: &PreparedInput) -> Result<Vec<f32>> {
         let input_tensor = Tensor::from_array(prepared.tensor.clone())?;
         let outputs = self.session.run(ort::inputs![input_tensor])?;
 
@@ -225,11 +218,23 @@ impl YoloModel {
             .ok_or_else(|| anyhow::anyhow!("No output tensor returned"))?;
 
         let (_shape, raw_data) = output_tensor.try_extract_tensor::<f32>()?;
+        Ok(raw_data.to_vec())
+    }
+
+    /// Decodes detection boxes from raw YOLO output tensor for given (conf, iou) thresholds.
+    pub fn decode_detections(
+        raw_data: &[f32],
+        orig_w: u32,
+        orig_h: u32,
+        conf_threshold: f32,
+        iou_threshold: f32,
+        prepared: &PreparedInput,
+    ) -> Result<Vec<Detection>> {
         let buf_size = raw_data.len();
 
-        let (grid, channels) = if buf_size % YOLO_GRID_640 == 0 {
+        let (grid, channels) = if buf_size.is_multiple_of(YOLO_GRID_640) {
             (YOLO_GRID_640, buf_size / YOLO_GRID_640)
-        } else if buf_size % YOLO_GRID_SMALL == 0 {
+        } else if buf_size.is_multiple_of(YOLO_GRID_SMALL) {
             (YOLO_GRID_SMALL, buf_size / YOLO_GRID_SMALL)
         } else {
             bail!("Unexpected output shape with {} floats", buf_size);
@@ -293,14 +298,36 @@ impl YoloModel {
         Ok(Self::nms(raw_boxes, iou_threshold))
     }
 
+    /// Predicts detections using a single (conf, iou) threshold pair.
+    pub fn predict(
+        &mut self,
+        orig_w: u32,
+        orig_h: u32,
+        conf_threshold: f32,
+        iou_threshold: f32,
+        prepared: &PreparedInput,
+    ) -> Result<Vec<Detection>> {
+        let raw_data = self.forward(prepared)?;
+        Self::decode_detections(
+            &raw_data,
+            orig_w,
+            orig_h,
+            conf_threshold,
+            iou_threshold,
+            prepared,
+        )
+    }
+
     /// Full 3-stage YOLO cascade + box filtering (matches KZKT PagePreparer).
     pub fn detect_bubbles(&mut self, img: &DynamicImage) -> Result<Vec<Detection>> {
         let (orig_w, orig_h) = img.dimensions();
         let prepared = Self::prepare_input(img);
+        let raw_data = self.forward(&prepared)?;
         let mut all_detections = Vec::new();
 
         for &(conf, iou) in &YOLO_PREDICTION_STAGES {
-            let stage_dets = self.predict(orig_w, orig_h, conf, iou, &prepared)?;
+            let stage_dets =
+                Self::decode_detections(&raw_data, orig_w, orig_h, conf, iou, &prepared)?;
             all_detections.extend(stage_dets);
         }
 

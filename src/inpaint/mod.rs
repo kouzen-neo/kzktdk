@@ -10,6 +10,31 @@ pub const MIN_COMPONENT_AREA: usize = 10;
 pub const MORPH_CLOSE_MIN_SIZE: f32 = 15.0;
 pub const MORPH_CLOSE_MAX_SIZE: f32 = 45.0;
 
+/// ITU-R BT.601 luma coefficients
+pub const LUM_R: f64 = 0.299;
+pub const LUM_G: f64 = 0.587;
+pub const LUM_B: f64 = 0.114;
+
+/// Inpainting luminance thresholds
+pub const LIGHT_BUBBLE_MEAN_LUM_THRESHOLD: f32 = 128.0;
+pub const LIGHT_BG_MIN_LUM: u8 = 195;
+pub const LIGHT_TEXT_MAX_LUM: u8 = 180;
+pub const DARK_BG_MAX_LUM: u8 = 60;
+pub const DARK_TEXT_MIN_LUM: u8 = 75;
+pub const TELEA_INPAINT_RADIUS: i32 = 3;
+pub const TEXT_DILATION_RADIUS: i32 = 1;
+pub const INSET_FRACTION: f32 = 0.10;
+
+#[inline]
+fn rgb_to_lum_f64(r: u8, g: u8, b: u8) -> f64 {
+    LUM_R * r as f64 + LUM_G * g as f64 + LUM_B * b as f64
+}
+
+#[inline]
+fn rgb_to_lum_u8(r: u8, g: u8, b: u8) -> u8 {
+    (LUM_R as f32 * r as f32 + LUM_G as f32 * g as f32 + LUM_B as f32 * b as f32).round() as u8
+}
+
 #[derive(Debug, Clone)]
 struct Component {
     pixels: Vec<(u32, u32)>,
@@ -175,11 +200,11 @@ pub fn inpaint_crop_with_mask(crop: &mut RgbImage, extra: Option<&GrayImage>) ->
     for y in 0..rows {
         for x in 0..cols {
             let p = crop.get_pixel(x, y);
-            sum_lum += 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+            sum_lum += rgb_to_lum_f64(p[0], p[1], p[2]);
         }
     }
     let mean_lum = (sum_lum / total_pixels as f64) as f32;
-    let is_light = mean_lum > 128.0;
+    let is_light = mean_lum > LIGHT_BUBBLE_MEAN_LUM_THRESHOLD;
 
     let mut bg_mask = GrayImage::new(cols, rows);
     let mut text_candidate_mask = GrayImage::new(cols, rows);
@@ -187,23 +212,22 @@ pub fn inpaint_crop_with_mask(crop: &mut RgbImage, extra: Option<&GrayImage>) ->
     for y in 0..rows {
         for x in 0..cols {
             let p = crop.get_pixel(x, y);
-            let lum =
-                (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32).round() as u8;
+            let lum = rgb_to_lum_u8(p[0], p[1], p[2]);
 
             if is_light {
-                // Light bubble: Background >= 195, Text <= 180
-                if lum >= 195 {
+                // Light bubble: Background >= LIGHT_BG_MIN_LUM, Text <= LIGHT_TEXT_MAX_LUM
+                if lum >= LIGHT_BG_MIN_LUM {
                     bg_mask.put_pixel(x, y, Luma([255]));
                 }
-                if lum <= 180 {
+                if lum <= LIGHT_TEXT_MAX_LUM {
                     text_candidate_mask.put_pixel(x, y, Luma([255]));
                 }
             } else {
-                // Dark bubble: Background <= 60, Text >= 75
-                if lum <= 60 {
+                // Dark bubble: Background <= DARK_BG_MAX_LUM, Text >= DARK_TEXT_MIN_LUM
+                if lum <= DARK_BG_MAX_LUM {
                     bg_mask.put_pixel(x, y, Luma([255]));
                 }
-                if lum >= 75 {
+                if lum >= DARK_TEXT_MIN_LUM {
                     text_candidate_mask.put_pixel(x, y, Luma([255]));
                 }
             }
@@ -253,8 +277,8 @@ pub fn inpaint_crop_with_mask(crop: &mut RgbImage, extra: Option<&GrayImage>) ->
 
     // Fallback: If no single background component was found, use an inset interior box
     if max_interior_score < total_pixels * MIN_INTERIOR_SCORE_RATIO {
-        let inset_x = (cols as f32 * 0.10).round().max(3.0) as u32;
-        let inset_y = (rows as f32 * 0.10).round().max(3.0) as u32;
+        let inset_x = (cols as f32 * INSET_FRACTION).round().max(3.0) as u32;
+        let inset_y = (rows as f32 * INSET_FRACTION).round().max(3.0) as u32;
         if cols > inset_x * 2 && rows > inset_y * 2 {
             for y in inset_y..rows.saturating_sub(inset_y) {
                 for x in inset_x..cols.saturating_sub(inset_x) {
@@ -325,7 +349,7 @@ pub fn inpaint_crop_with_mask(crop: &mut RgbImage, extra: Option<&GrayImage>) ->
     }
 
     // Dilate text mask with 3x3 structuring element (radius 1)
-    let dilated_text = dilate_mask(&text_mask, 1);
+    let dilated_text = dilate_mask(&text_mask, TEXT_DILATION_RADIUS);
 
     // Re-apply interior constraint so dilation never crosses the bubble outline
     let mut final_mask = GrayImage::new(cols, rows);
@@ -372,7 +396,7 @@ pub fn inpaint_crop_with_mask(crop: &mut RgbImage, extra: Option<&GrayImage>) ->
     }
 
     // 5. Run native Fast Marching Telea inpainting on the crop
-    crop.telea_inpaint(&final_mask, 3)
+    crop.telea_inpaint(&final_mask, TELEA_INPAINT_RADIUS)
         .map_err(|e| anyhow::anyhow!("Telea inpainting error: {:?}", e))?;
 
     Ok(())
@@ -448,15 +472,15 @@ pub fn inpaint_regions(img: &mut RgbImage, regions: &[MaskedRegion]) -> Result<(
             continue;
         }
 
-        if let Some(ref m) = region.mask {
-            if m.dimensions() != (w, h) {
-                anyhow::bail!(
-                    "Custom mask size {:?} does not match bubble crop {}x{}",
-                    m.dimensions(),
-                    w,
-                    h
-                );
-            }
+        if let Some(ref m) = region.mask
+            && m.dimensions() != (w, h)
+        {
+            anyhow::bail!(
+                "Custom mask size {:?} does not match bubble crop {}x{}",
+                m.dimensions(),
+                w,
+                h
+            );
         }
 
         let mut crop = RgbImage::new(w, h);

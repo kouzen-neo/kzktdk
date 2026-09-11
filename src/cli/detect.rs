@@ -80,7 +80,7 @@ pub async fn run(
             let img =
                 image::open(&img_path).with_context(|| format!("Failed to open {:?}", img_path))?;
             let (w, h) = (img.width(), img.height());
-            let mut detections = yolo.detect_bubbles(&img)?;
+            let detections = yolo.detect_bubbles(&img)?;
             dinfo!("Found {} speech bubbles.", detections.len());
             // freetext
             let mut ft_boxes: Vec<[u32; 4]> = Vec::new();
@@ -200,7 +200,7 @@ pub async fn run(
             _temp_guard: _,
             is_archive: _,
             is_pdf: _,
-            original_name,
+            original_name: _,
         } => {
             let out_dir = output.unwrap_or_else(|| PathBuf::from("detected"));
             std::fs::create_dir_all(&out_dir)?;

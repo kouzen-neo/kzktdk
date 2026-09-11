@@ -71,6 +71,7 @@ pub struct TranslationContext<'a> {
     pub events: Option<&'a (dyn Fn(PageEvent) + Send + Sync)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_provider(
     name: &str,
     gemini_key: &Option<String>,
@@ -130,15 +131,8 @@ pub async fn translate_page(
 ) -> Result<()> {
     // Fail fast when rec is explicitly required but the engine is a stub
     // (never translate placeholder guesses).
-    if ctx.translate_free_text || ctx.mode == "ocr" {
-        let what = if ctx.translate_free_text {
-            "--translate-free-text"
-        } else {
-            "--mode ocr"
-        };
-        if ctx.ocr != "none" {
-            crate::ocr::ensure_rec_available(&ctx.ocr, ctx.ocr_script)?;
-        }
+    if (ctx.translate_free_text || ctx.mode == "ocr") && ctx.ocr != "none" {
+        crate::ocr::ensure_rec_available(&ctx.ocr, ctx.ocr_script)?;
     }
     let jsonl = ctx.progress == "jsonl";
     let silent_events = ctx.events.is_some();
@@ -176,7 +170,7 @@ pub async fn translate_page(
     };
     let img =
         image::open(input_path).with_context(|| format!("Failed to open {:?}", input_path))?;
-    let mut detections = yolo.detect_bubbles(&img)?;
+    let detections = yolo.detect_bubbles(&img)?;
 
     if detections.is_empty() && !ctx.translate_free_text {
         tinfo!("    [Page] No dialogue bubbles detected. Copying original.");
@@ -193,7 +187,8 @@ pub async fn translate_page(
         if ctx.ocr == "none" {
             eprintln!("[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only");
         } else {
-            let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
+            let engine =
+                crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
             if engine.name() == "none" {
                 eprintln!("[freetext] engine none, skip freetext");
             } else {
@@ -290,7 +285,8 @@ pub async fn translate_page(
     // --- OCR raw_text gathering (for metadata) ---
     let mut raw_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if ctx.ocr != "none" {
-        let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
+        let engine =
+            crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
         if engine.name() != "none" {
             // recognize per crop (bubble + ft)
             for c in &crops {
@@ -305,12 +301,11 @@ pub async fn translate_page(
                         .and_then(|idx| detections.get(idx - 1))
                         .map(|d| [d.x1, d.y1, d.x2, d.y2])
                 };
-                if let Some(bbox) = bbox_opt {
-                    if let Some(txt) = engine.recognize(&orig_rgb, bbox) {
-                        if !txt.trim().is_empty() {
-                            raw_map.insert(c.id.clone(), txt);
-                        }
-                    }
+                if let Some(bbox) = bbox_opt
+                    && let Some(txt) = engine.recognize(&orig_rgb, bbox)
+                    && !txt.trim().is_empty()
+                {
+                    raw_map.insert(c.id.clone(), txt);
                 }
             }
             if !raw_map.is_empty() {
@@ -395,10 +390,10 @@ pub async fn translate_page(
                 .await;
             match raw_res {
                 Ok(raw) => {
-                    if let Ok(map) = crate::translation::parse_translation_json(&raw) {
-                        if !map.is_empty() {
-                            return Ok(norm_map(map));
-                        }
+                    if let Ok(map) = crate::translation::parse_translation_json(&raw)
+                        && !map.is_empty()
+                    {
+                        return Ok(norm_map(map));
                     }
                     if verbose {
                         println!("  [Failover] {} unparseable OCR json", prov.name());
@@ -423,10 +418,8 @@ pub async fn translate_page(
     } else {
         let use_ocr_path = ctx.mode == "ocr" || ctx.mode == "auto";
         let ocr_available = !raw_map.is_empty() || ctx.ocr != "none";
-        if ctx.mode == "ocr" && !ocr_available {
-            if !silent_events {
-                eprintln!("[mode ocr] no OCR results, fallback vision");
-            }
+        if ctx.mode == "ocr" && !ocr_available && !silent_events {
+            eprintln!("[mode ocr] no OCR results, fallback vision");
         }
         if use_ocr_path && ctx.mode == "ocr" && ocr_available {
             // try OCR text-only
@@ -662,22 +655,23 @@ pub async fn translate_page(
     // normalize ft keys to lowercase
     all_translations = norm_map(all_translations);
     // Glossary enforcement (single rewrite retry per leaked term).
-    if let Some(g) = &ctx.glossary {
-        if !g.is_empty() && !all_translations.is_empty() {
-            let (h, m) = crate::translation::enforce_glossary(
-                ctx.chain,
-                ctx.rate_limiter,
-                &mut all_translations,
-                g,
-                ctx.target_lang,
-                verbose,
-            )
-            .await;
-            ctx.gloss_hits.fetch_add(h, Ordering::SeqCst);
-            ctx.gloss_misses.fetch_add(m, Ordering::SeqCst);
-            if m > 0 || h > 0 {
-                tinfo!("      [Glossary] hits={} misses={}", h, m);
-            }
+    if let Some(g) = &ctx.glossary
+        && !g.is_empty()
+        && !all_translations.is_empty()
+    {
+        let (h, m) = crate::translation::enforce_glossary(
+            ctx.chain,
+            ctx.rate_limiter,
+            &mut all_translations,
+            g,
+            ctx.target_lang,
+            verbose,
+        )
+        .await;
+        ctx.gloss_hits.fetch_add(h, Ordering::SeqCst);
+        ctx.gloss_misses.fetch_add(m, Ordering::SeqCst);
+        if m > 0 || h > 0 {
+            tinfo!("      [Glossary] hits={} misses={}", h, m);
         }
     }
     emit("translate_end");

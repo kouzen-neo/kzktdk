@@ -259,10 +259,8 @@ pub fn editor_translate_batch(
     }
     // Fail fast: stub OCR engines cannot read text (never guess).
     let ocr_script_enum = crate::ocr::OcrScript::from_key(&config.ocr_script);
-    if config.translate_free_text || config.mode == "ocr" {
-        if config.ocr != "none" {
-            crate::ocr::ensure_rec_available(&config.ocr, ocr_script_enum).map_err(err)?;
-        }
+    if (config.translate_free_text || config.mode == "ocr") && config.ocr != "none" {
+        crate::ocr::ensure_rec_available(&config.ocr, ocr_script_enum).map_err(err)?;
     }
 
     let primary = build_provider(
