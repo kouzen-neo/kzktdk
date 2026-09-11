@@ -19,19 +19,19 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 **Performance & Code Quality**: 3x bubble detection acceleration, HTTP connection pooling, OCR allocation optimizations, and metadata god-function deconstruction.
 
 ### Performance & Optimization
-- **YOLO 3x Detection Acceleration** (`src/model/yolo.rs`): Memisahkan eksekusi ONNX `session.run` ke dalam `forward(&mut self, prepared)` dan decoding multi-skala `decode_detections(...)`. Deteksi balon dialog kini hanya melakukan **1 kali** forward pass alih-alih 3 kali.
-- **HTTP Connection Pooling** (`src/translation/mod.rs`): Mengganti inisialisasi `reqwest::Client::new()` per request pada `translate_mosaic_raw` dan `translate_text` dengan static connection pool `OnceLock<reqwest::Client>` (timeout 120s, connect timeout 20s).
-- **OCR Heap Allocations Reduction** (`src/ocr.rs`): Mengganti alokasi matriks 2D `vec![vec![false; w]; h]` pada deteksi text box heatmap dengan flat 1D vector `vec![false; w * h]`, mengeliminasi ~1.280 alokasi heap per halaman.
+- **YOLO 3x Detection Acceleration** (`src/model/yolo.rs`): Separated ONNX `session.run` execution into `forward(&mut self, prepared)` and multi-scale decoding into `decode_detections(...)`. Bubble detection now performs **one** forward pass per image instead of three, yielding ~3x speedup.
+- **HTTP Connection Pooling** (`src/translation/mod.rs`): Replaced per-request `reqwest::Client::new()` instantiation in `translate_mosaic_raw` and `translate_text` with a shared static connection pool via `OnceLock<reqwest::Client>` (120s request timeout, 20s connect timeout).
+- **OCR Heap Allocation Reduction** (`src/ocr.rs`): Replaced 2D vector allocation `vec![vec![false; w]; h]` in heatmap text-box detection with a flat 1D vector `vec![false; w * h]`, eliminating ~1,280 heap allocations per page.
 
 ### Refactoring & Architecture
-- **Dekomposisi Metadata God Function** (`src/cli/metadata.rs`): Memecah fungsi `run` 1.442 baris monolitik menjadi 9 fungsi terisolasi (`run_export`, `run_render`, `run_edit`, `run_validate`, `run_preview`, `run_show`, `run_pack`, `run_mask`, `run_watch`).
-- **Ekstraksi Argumen CLI** (`src/cli/args.rs`, `src/main.rs`, `src/cli/translate.rs`): Mengekstrak 34 inlined fields `Commands::Translate` menjadi struct mandiri `TranslateArgs` dan menyederhanakan 75 baris argumen unpacking di `main.rs` menjadi 1 baris bersih.
-- **Sentralisasi Magic Numbers Luminansi** (`src/inpaint/mod.rs`): Mengekstrak koefisien luminansi ITU-R BT.601 (`LUM_R`, `LUM_G`, `LUM_B`) dan ambang batas inpainting ke konstanta bernama dengan fungsi pembantu `rgb_to_lum_f64` dan `rgb_to_lum_u8`.
+- **Metadata God-Function Deconstruction** (`src/cli/metadata.rs`): Split the monolithic 1,442-line `run` function into 9 isolated, testable helpers: `run_export`, `run_render`, `run_edit`, `run_validate`, `run_preview`, `run_show`, `run_pack`, `run_mask`, `run_watch`.
+- **CLI Argument Extraction** (`src/cli/args.rs`, `src/main.rs`, `src/cli/translate.rs`): Extracted 34 inlined fields from `Commands::Translate` into a dedicated `TranslateArgs` struct and simplified 75 lines of manual argument unpacking in `main.rs` to a single clean dispatch line.
+- **Luminance Magic Number Centralization** (`src/inpaint/mod.rs`): Extracted ITU-R BT.601 luminance coefficients (`LUM_R`, `LUM_G`, `LUM_B`) and inpainting thresholds (`LIGHT_BUBBLE_MEAN_LUM_THRESHOLD`, `LIGHT_BG_MIN_LUM`, `LIGHT_TEXT_MAX_LUM`, `DARK_BG_MAX_LUM`, `DARK_TEXT_MIN_LUM`, `TELEA_INPAINT_RADIUS`, `TEXT_DILATION_RADIUS`, `INSET_FRACTION`) into named constants with inline helpers `rgb_to_lum_f64` and `rgb_to_lum_u8`.
 
 ### Dead Code & Bug Fixes
-- **Deduplikasi Cek Folder**: Menghapus duplikasi pengecekan `if !input.is_dir()` di `metadata pack`.
-- **Pembersihan Variabel Tak Terpakai**: Menghapus variabel `mtimes`/`mt` di `metadata watch` dan `what` di pipeline/translate.
-- **Perbaikan Regresi Test & Clippy**: Memperbaiki unit test `stub_ocr_rec_is_rejected_before_model_load` pada `tests/tauri_batch.rs` untuk script `cht`, memperbaiki struct update syntax, dan memastikan nol peringatan clippy (`cargo clippy --all-targets --features tauri -- -D warnings`).
+- **Duplicate Guard Removal**: Removed duplicated `if !input.is_dir()` check in `metadata pack`.
+- **Unused Variable Cleanup**: Dropped unused `mtimes`/`mt` tracking in `metadata watch` and unreferenced `what` in the pipeline and translate modules.
+- **Test Regression & Clippy Fixes**: Fixed `stub_ocr_rec_is_rejected_before_model_load` in `tests/tauri_batch.rs` to target the unsupported `cht` script now that RapidOCR is fully implemented; corrected struct update syntax; ensured zero clippy warnings (`cargo clippy --all-targets --features tauri -- -D warnings`).
 
 ---
 
