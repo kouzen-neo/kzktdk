@@ -50,39 +50,45 @@ esac
 
 echo "[*] Detected platform: $OS ($ARCH) -> Target: $TARGET"
 
-# 2. Resolve latest version tag
-echo "[*] Fetching latest release info..."
-TAG=""
-if command -v curl >/dev/null 2>&1; then
-    # Try GitHub redirect header first to avoid API rate limits
-    TAG="$(curl -sIL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null | rev | cut -d'/' -f1 | rev || true)"
-fi
+LOCAL_ARCHIVE="${1:-}"
 
-if [ -z "$TAG" ] || [ "$TAG" = "latest" ]; then
-    TAG="$FALLBACK_TAG"
-fi
-
-ASSET_NAME="kzktdk-${TARGET}.${EXT}"
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/${TAG}/${ASSET_NAME}"
-
-echo "[*] Installing KZKT-DK ${TAG}..."
-echo "[*] Download URL: $DOWNLOAD_URL"
-
-# 3. Download and unpack
+# 2. Resolve version and package
 TMP_DIR="$(mktemp -d)"
 cleanup() {
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
-echo "[*] Downloading package..."
-if command -v curl >/dev/null 2>&1; then
-    curl -fSL --progress-bar "$DOWNLOAD_URL" -o "$TMP_DIR/$ASSET_NAME"
-elif command -v wget >/dev/null 2>&1; then
-    wget -q --show-progress "$DOWNLOAD_URL" -O "$TMP_DIR/$ASSET_NAME"
+ASSET_NAME="kzktdk-${TARGET}.${EXT}"
+
+if [ -n "$LOCAL_ARCHIVE" ] && [ -f "$LOCAL_ARCHIVE" ]; then
+    echo "[*] Installing from local archive: $LOCAL_ARCHIVE"
+    cp "$LOCAL_ARCHIVE" "$TMP_DIR/$ASSET_NAME"
 else
-    echo "[-] Error: curl or wget is required to download kzktdk."
-    exit 1
+    echo "[*] Fetching latest release info..."
+    TAG=""
+    if command -v curl >/dev/null 2>&1; then
+        TAG="$(curl -sIL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null | rev | cut -d'/' -f1 | rev || true)"
+    fi
+
+    if [ -z "$TAG" ] || [ "$TAG" = "latest" ] || [ "$TAG" = "releases" ]; then
+        TAG="$FALLBACK_TAG"
+    fi
+
+    DOWNLOAD_URL="https://github.com/$REPO/releases/download/${TAG}/${ASSET_NAME}"
+
+    echo "[*] Installing KZKT-DK ${TAG}..."
+    echo "[*] Download URL: $DOWNLOAD_URL"
+
+    echo "[*] Downloading package..."
+    if command -v curl >/dev/null 2>&1; then
+        curl -fSL --progress-bar "$DOWNLOAD_URL" -o "$TMP_DIR/$ASSET_NAME"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --show-progress "$DOWNLOAD_URL" -O "$TMP_DIR/$ASSET_NAME"
+    else
+        echo "[-] Error: curl or wget is required to download kzktdk."
+        exit 1
+    fi
 fi
 
 echo "[*] Extracting..."

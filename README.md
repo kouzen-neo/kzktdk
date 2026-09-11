@@ -43,6 +43,18 @@ curl -fsSL https://raw.githubusercontent.com/kouzen-neo/kzktdk/master/install.sh
 irm https://raw.githubusercontent.com/kouzen-neo/kzktdk/master/install.ps1 | iex
 ```
 
+#### Uninstallation
+To completely remove `kzktdk` and its data assets:
+- **Linux & macOS**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kouzen-neo/kzktdk/master/uninstall.sh | bash
+  ```
+  *(Pass `--purge` to also clear local translation cache and configs)*
+- **Windows (PowerShell)**:
+  ```powershell
+  irm https://raw.githubusercontent.com/kouzen-neo/kzktdk/master/uninstall.ps1 | iex
+  ```
+
 ---
 
 ### Build from Source (Developers)
