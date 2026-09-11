@@ -112,64 +112,64 @@ $env:GEMINI_API_KEY = "AIzaSy..."
 
 ---
 
-## ✨ Features (v0.2.0)
+## Features
 
-### 🚀 Translation Pipeline
+### Translation Pipeline
 - **Multi-Provider Support**: Gemini, OpenAI, Claude, OpenRouter, or local Ollama models
 - **Translation Cache**: SQLite-based cache with blake3 hashing for instant retranslation
 - **Glossary Enforcement**: JSON term mapping with strict LLM compliance checking
 - **Retry & Resume**: `--retry-failed` reuses good pages, retranslates only failures
 - **Progress Tracking**: JSONL streaming for real-time GUI integration
 
-### 🔍 OCR & Detection
-- **Rapid OCR (NEW)**: PP-OCRv3 models for JP/EN/KR/CN with auto-language detection (~2s/page)
+### OCR & Text Recognition
+- **Rapid OCR**: PP-OCRv3 models for Japanese, English, Korean, Chinese with auto-language detection (~2s/page)
 - **3-Stage YOLO Cascade**: 0.28/0.18/0.10 confidence thresholds with IoU filtering
 - **Freetext Detection**: Capture text outside bubbles with merge-nearby algorithm
 - **Tesseract Integration**: Shell-out to external binary for 100+ languages
 
-### 🎨 Editor Backend (NEW)
-- **7 Metadata Commands**: export, edit, render, preview, show, watch, pack
-- **JSON Sidecar Files**: `.kedit.json` per page + project-level metadata
+### Editor Backend
+- **Metadata Commands**: 7 commands for export, edit, render, preview, show, watch, pack workflows
+- **JSON Sidecar Files**: `.kedit.json` per page with project-level metadata support
 - **Live Preview**: Single bubble rendering in <100ms for GUI editors
-- **Batch Rendering**: Parallel rendering with `--jobs auto`
-- **Transactional Editing**: `--stdin-patch` with rollback on error
+- **Batch Rendering**: Parallel rendering with `--jobs auto` worker pool
+- **Transactional Editing**: `--stdin-patch` with atomic rollback on error
 
-### 🖋️ Font Management (NEW)
-- **Font Registry**: `~/.local/share/kzktdk/fonts` with global defaults
-- **Per-Bubble Override**: Custom font family, size, color, stroke, alignment
-- **CJK Support**: Separate Latin + CJK font handling
+### Font Management
+- **Font Registry**: Global font pool at `~/.local/share/kzktdk/fonts` with per-user defaults
+- **Per-Bubble Override**: Custom font family, size, color, stroke, alignment per bubble
+- **CJK Support**: Separate Latin and CJK font handling with auto-fallback
 
-### 📦 Archive Support
-- **CBZ/ZIP/EPUB**: Natural sort (1,2,10) with alphanumeric awareness
-- **PDF**: Input + output via Pdfium bindings (see `docs/PDFIUM.md`)
-- **Batch Processing**: Parallel detection/inpainting/translation with semaphore pool
+### Archive & Batch Processing
+- **Format Support**: CBZ, ZIP, EPUB, PDF input and output
+- **Natural Sorting**: Alphanumeric-aware ordering (1, 2, ..., 9, 10) instead of lexicographic
+- **Parallel Processing**: Concurrent detection, inpainting, and translation with semaphore pooling
 
-### 🛡️ Quality & Safety
-- **Zero Runtime Unwrap**: All panics eliminated from production paths
-- **Supply Chain Audit**: GitHub Actions workflow, EUPL-1.2 inpaint accepted
-- **Dual License**: MIT OR Apache-2.0
-- **43 Tests**: 20 unit + 14 CLI contract + 9 Tauri integration
+### Quality Assurance
+- **Zero Runtime Panics**: All `unwrap`/`expect` eliminated from production code paths
+- **Supply Chain Audit**: Automated GitHub Actions workflow, dependencies vetted
+- **Dual License**: MIT OR Apache-2.0 for maximum compatibility
+- **Comprehensive Testing**: 43 tests (20 unit + 14 CLI contract + 9 Tauri integration)
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 # 1. Install
 cargo install --path .
 
-# 2. Set API key (choose one)
-export GEMINI_API_KEY="AIzaSy..."        # Gemini (recommended)
+# 2. Set API key (choose one provider)
+export GEMINI_API_KEY="AIzaSy..."        # Google Gemini (recommended)
 export OPENAI_API_KEY="sk-proj-..."     # OpenAI
-export ANTHROPIC_API_KEY="sk-ant-..."   # Claude
+export ANTHROPIC_API_KEY="sk-ant-..."   # Anthropic Claude
 
 # 3. Translate a manga chapter
 kzktdk translate chapter_01.cbz -t Indonesian
 
-# 4. Try Rapid OCR (auto-detects language)
+# 4. Try Rapid OCR with auto-language detection
 kzktdk translate page.jpg --ocr rapid --ocr-script auto
 
-# 5. Use local Ollama (100% offline)
+# 5. Use local Ollama for 100% offline translation
 kzktdk translate chapter.cbz --provider ollama \
   --openai-base-url http://localhost:11434/v1 \
   --openai-model llama3.2-vision
