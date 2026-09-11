@@ -47,7 +47,7 @@ kzktdk@{version}
 #[derive(Parser)]
 #[command(
     name = "kzktdk",
-    version = "0.1.0",
+    version = "0.2.0",
     about = "KZKT Desktop - High-Performance Comic & Manga Translation CLI",
     help_template = MAIN_HELP_TEMPLATE
 )]

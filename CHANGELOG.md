@@ -14,7 +14,56 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
-## [0.1.1-dev.18] - 2026-09-11
+## [0.2.0] - 2026-09-11
+
+**Major release**: Rapid OCR 5-language implementation + full editor backend + Tauri bindings.
+
+### Added
+- **Rapid OCR 5-Language Full Implementation**:
+  - CTC decode with argmax → blank collapse, vertical text rotation
+  - Multi-language: PP-OCRv3 models for JP (3.6MB), EN (9.0MB), KR (3.3MB), CN (10.7MB)
+  - Auto-download from HuggingFace/PaddleOCR to `~/.cache/kzktdk/models/rapid/`
+  - Session cache (`Arc<Mutex<Session>>`) per language, loaded once per process
+  - Auto-detect: trial-decode EN→JP→KR→CN, picks best confidence (threshold 0.3)
+  - Performance: 4.7s → 2s per page (57% faster), 5 pages in 10.4s
+- **Editor Backend** (7 commands):
+  - `metadata export`: Detect → JSON (no LLM)
+  - `metadata edit`: 20+ flags (set/bbox/add/delete/style/stdin-patch transactional)
+  - `metadata render`: Single + batch (--project + --jobs auto)
+  - `metadata preview`: Live bubble preview (--to-stdout + --thumb)
+  - `metadata show`: Table view (--id filter, --format json)
+  - `metadata watch`: Auto re-render dirty pages (--once for CI)
+  - `metadata pack`: Folder → CBZ
+- **Font Management** (5 commands): import/list/remove/set-default/get-default with registry `~/.local/share/kzktdk/fonts`
+- **Tauri Bindings** (`src/tauri.rs`): 7 GUI-ready functions (load/apply_patch/render/preview/detect/pack/batch_translate)
+- **Translation Features**: cache, glossary, retry-failed, progress JSONL, reading order, mask brush, PDF support
+- **CLI Modularization**: `src/main.rs` 3743→36 lines, split to `src/cli/*`
+- **Supply Chain**: audit.yml workflow, EUPL-1.2 inpaint accepted, MIT OR Apache-2.0 dual license
+
+### Changed
+- `TranslationContext.ocr_script` now enum (was String)
+- CLI: `--ocr-script` accepts `auto|jp|en|kr|cn|cht`
+- Help text: rapid OCR fully documented, manga deprecated
+- Constants centralized to `src/config.rs`
+
+### Removed
+- Manga OCR implementation (−50 lines), `--ocr manga` shows deprecation warning
+
+### Fixed
+- Session cache lifetime: extract tensor inside lock
+- Zero `unwrap`/`expect` on runtime paths
+- Help text updated for 5-lang support
+
+### Documentation
+- README: +68 lines (editor backend, font management, OCR options)
+- DOCUMENTATION.md: OCR §8 rewritten (5-lang architecture, performance)
+- CHANGELOG: Full dev.1-18 history documented
+
+### Tests
+- 20 unit + 14 CLI contract + 9 Tauri tests, all green
+- Live verification: JP manga 5 bubbles in 1.7-2s
+
+---
 
 Branch: `dev-kz-debug` (merged from `feat/rapid-rec-auto`)
 
