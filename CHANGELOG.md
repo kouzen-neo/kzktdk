@@ -10,6 +10,32 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 ### Rencana
 - Tauri v2 GUI skeleton (Svelte + Konva.js)
 - Hardware acceleration (DirectML/CoreML/CUDA)
+- Traditional Chinese (cht) OCR model conversion
+
+---
+
+## [0.1.1-dev.18] - 2026-09-11
+
+Branch: `dev-kz-debug` (merged from `feat/rapid-rec-auto`)
+
+### Added
+- **Rapid OCR 5-Language Full Implementation**:
+  - **CTC Decode** (`6a22307`): `rapid_recognize_crop()` with argmax → CTC collapse (blank/duplicates), vertical text rotation (h>w), normalize [0,1], resize height=32, return (text, confidence).
+  - **Multi-Language** (`0e6f5d7`, `5f1d70c`): PP-OCRv3 models for JP (3.6MB), EN (9.0MB), KR (3.3MB), CN (10.7MB) via `config::rapid_model_urls()`. Auto-download from HuggingFace/PaddleOCR to `~/.cache/kzktdk/models/rapid/`. Traditional Chinese (cht) returns clear "not yet supported" error (no ONNX available).
+  - **Session Cache** (`bfda021`): `Arc<Mutex<Session>>` via `OnceLock` per language, loaded once per process. Extract tensor data inside lock (lifetime fix). Performance: 4.7s → 2s per page (57% faster), 5 pages in 10.4s (~2s/page).
+  - **Auto-Detect** (`bfda021`): `trial_decode_language()` tests EN→JP→KR→CN with 2-3 sample boxes, picks best confidence (threshold 0.3). Integrated in `rapid_detect_ort` for `OcrScript::Auto`, logs `[rapid-auto] detected Japanese (conf 0.87)`.
+  - `TranslationContext.ocr_script` now enum (was String), updated 16 call sites (cli/pipeline/tauri/tests).
+
+### Removed
+- **Manga OCR Cleanup** (`baa85e5`): Deleted `MangaOcr` struct (−50 lines), `engine_rec_stub()` returns false (no stubs remain), `--ocr manga` shows deprecation warning → noop fallback.
+
+### Changed
+- CLI: `--ocr-script` now accepts `auto|jp|en|kr|cn|cht` (was just `jp`).
+- Tests: 20 unit + 14 CLI green, rapid no longer stub, cht unsupported error tested.
+
+### Fixed
+- Session cache lifetime issue: extract tensor data inside lock before releasing (was: return reference to dropped session).
+- Live verification: JP manga 5 bubbles OCR→translate in 1.7-2s (down from 4.7s), batch 5 pages 10.4s.
 
 ---
 
