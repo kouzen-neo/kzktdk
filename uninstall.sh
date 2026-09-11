@@ -16,7 +16,7 @@ echo "[*] Uninstalling KZKT-DK (kzktdk)..."
 
 # 1. Remove binaries
 REMOVED_BIN=false
-for bin_path in "${HOME}/.local/bin/kzktdk" "/usr/local/bin/kzktdk"; do
+for bin_path in "${HOME}/.local/bin/kzktdk" "${HOME}/.cargo/bin/kzktdk" "/usr/local/bin/kzktdk"; do
     if [ -f "$bin_path" ]; then
         if [ -w "$bin_path" ] || [ "$(id -u)" -eq 0 ]; then
             rm -f "$bin_path"
