@@ -189,9 +189,60 @@ kzktdk metadata pack ./rendered -o chapter.cbz --format json
 
 ---
 
-## 8. OCR Status (rec explicitly unsupported)
+## 8. OCR Support (Rapid OCR 5-Language Implementation)
 
-- **Detection works**: YOLO bubble detection + RapidOCR *detection* boxes (when models are cached) are real.
-- **Recognition (rec) is NOT implemented** for the `rapid`/`manga` engines (`src/ocr.rs::rapid_recognize_crop` is a stub). They return **no text** and log a one-time warning — never placeholder guesses (the old fake `テスト`/`フリーテキスト` strings were removed in 0.1.1-dev.17).
-- **Fail fast**: `--translate-free-text` or `--mode ocr` combined with `--ocr rapid|manga` aborts with a clear `not implemented` error (exit 1 / `Err` in Tauri, never a panic, never silent). Enforcement points: `ocr::ensure_rec_available`, called from `translate_page`, `cli::detect::run`, `cli::translate::run`, `tauri::editor_translate_batch` — all before model load, so the error needs no model and no network.
-- **Real alternative today**: `--ocr tesseract` shells out to the external `tesseract` binary (graceful `None` when absent). `--mode auto` keeps working: with an empty `raw_map` it falls back to vision.
+### 8.1 Rapid OCR (PP-OCRv3 ONNX)
+
+**Implemented**: Full text recognition for 5 languages with auto-detection.
+
+#### Supported Languages
+- **Japanese** (`--ocr-script jp`): PP-OCRv3 JP model (3.6 MB)
+- **English** (`--ocr-script en`): PP-OCRv3 EN model (9.0 MB)
+- **Korean** (`--ocr-script kr`): PP-OCRv3 KR model (3.3 MB)
+- **Chinese Simplified** (`--ocr-script cn`): PP-OCRv3 CN model (10.7 MB)
+- **Auto-detect** (`--ocr-script auto`): Trial-decode with 2-3 sample bubbles, picks best confidence (threshold 0.3)
+
+#### Architecture
+- **Detection**: PP-OCRv3 detection model (2.4 MB, shared across languages)
+- **Recognition**: CTC decode with blank collapse, per-language character dictionaries
+- **Session Cache**: Models loaded once per process (`Arc<Mutex<Session>>` via `OnceLock`)
+- **Model Download**: Auto-fetched from HuggingFace/PaddleOCR GitHub, cached `~/.cache/kzktdk/models/rapid/`
+
+#### Performance
+- **Speed**: ~2s per page (down from 4.7s without session cache, 57% faster)
+- **Batch**: 5 pages in 10.4s (~2s/page average)
+
+#### Traditional Chinese (cht)
+Not yet implemented (no ONNX available from PaddleOCR). Error message directs to `--ocr-script cn` or `--ocr tesseract`.
+
+#### Usage
+```bash
+# Japanese (default)
+kzktdk translate "page.jpg" --ocr rapid --ocr-script jp
+
+# Auto-detect (English → Japanese → Korean → Chinese)
+kzktdk translate "page.jpg" --ocr rapid --ocr-script auto
+
+# Korean
+kzktdk translate "page.jpg" --ocr rapid --ocr-script kr
+```
+
+### 8.2 Tesseract OCR (External Binary)
+
+Shells out to `tesseract` binary (graceful fallback when absent). Supports 100+ languages via Tesseract's language packs.
+
+```bash
+kzktdk translate "page.jpg" --ocr tesseract --ocr-script jpn
+```
+
+### 8.3 Vision-based OCR (LLM)
+
+Default mode. No local OCR models required — LLM extracts text from mosaic image directly.
+
+```bash
+kzktdk translate "page.jpg" --mode vision  # Default
+```
+
+### 8.4 Manga OCR (Deprecated)
+
+`--ocr manga` now shows deprecation warning and falls back to noop (stub removed). Use `--ocr rapid` or `--ocr tesseract` instead.

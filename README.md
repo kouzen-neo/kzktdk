@@ -205,11 +205,73 @@ kzktdk translate "./manga/chapter_01" -o out/ --glossary kamus.json
 | `1` | System error, or at least one page failed (original copied) |
 | `130` | Cancelled via Ctrl-C (in-flight page finished, queue aborted) |
 
+### Editor Backend Commands
+
+#### Export Detections to JSON (No LLM)
+```bash
+kzktdk metadata export "page.png" --json "page.kedit.json"
+kzktdk metadata export "chapter/" --json "project.kedit.json"
+```
+
+#### Edit Metadata (Set Text, Bbox, Style)
+```bash
+kzktdk metadata edit "page.kedit.json" --set "1=Hello" --bbox "1=100,50,200,80"
+kzktdk metadata edit "page.kedit.json" --font-size "1=22" --text-color "1=255,0,0"
+kzktdk metadata edit "page.kedit.json" --stdin-patch < patch.json  # Transactional patch
+```
+
+#### Render from Metadata (Single or Batch)
+```bash
+# Single page
+kzktdk metadata render "page.png" --metadata "page.kedit.json" -o "rendered.jpg"
+
+# Batch render all pages in project
+kzktdk metadata render --project "project.kedit.json" --images "orig/" -o "rendered/" --jobs auto
+```
+
+#### Preview Single Bubble (Live Editor)
+```bash
+# Save to file
+kzktdk metadata preview "page.png" --metadata "page.kedit.json" --id 1 --text "Hi" -o "preview.jpg"
+
+# Base64 to stdout (for GUI)
+kzktdk metadata preview "page.png" --metadata "page.kedit.json" --id 1 --text "Hi" --to-stdout --thumb 512
+```
+
+#### Show Metadata Table
+```bash
+kzktdk metadata show "page.kedit.json"
+kzktdk metadata show "page.kedit.json" --id 1  # Filter by bubble ID
+kzktdk metadata show "page.kedit.json" --format json  # Machine-readable
+```
+
+#### Watch & Auto Re-render
+```bash
+kzktdk metadata watch --project "project.kedit.json" --images "orig/" -o "rendered/"
+kzktdk metadata watch --project "project.kedit.json" -o "rendered/" --once  # Render once (CI)
+```
+
+#### Pack to CBZ
+```bash
+kzktdk metadata pack "rendered/" -o "chapter.cbz"
+```
+
+### Font Management
+
+```bash
+kzktdk font list                        # List imported fonts
+kzktdk font import "CustomFont.ttf"     # Import font to registry
+kzktdk font set-default "Custom Font"   # Set global default
+kzktdk font get-default                 # Show current default
+kzktdk font remove "Custom Font"        # Remove from registry
+```
+
 ### Inspection and Preprocessing Commands
 
 #### Speech Bubble Detection (Draw Bounding Boxes)
 ```bash
 kzktdk detect "page.png" -o "detected.png"
+kzktdk detect "chapter/" -o "detected/" --json "detections.json"
 ```
 
 #### Inpaint Only (Erase Original Text)
@@ -247,6 +309,10 @@ Usage: `kzktdk translate [OPTIONS] <INPUT>`
 | `-f, --font <PATH>` | Comic font file (TTF format) | `fonts/Komika Axis.ttf` |
 | `--cjk-font <PATH>` | Font file for CJK glyph rendering | `fonts/KosugiMaru.ttf` |
 | `-m, --model <PATH>` | ONNX model file path | `models/kzkt.onnx` |
+| `--ocr <ENGINE>` | OCR engine for freetext: `none`, `rapid`, `tesseract`, `vision`, `local` | `none` |
+| `--ocr-script <SCRIPT>` | OCR language: `auto`, `jp`, `en`, `kr`, `cn`, `cht` (rapid only supports auto/jp/en/kr/cn) | `jp` |
+| `--translate-free-text` | Detect and translate text outside bubbles (requires `--ocr`) | off |
+| `--mode <MODE>` | Translation mode: `vision` (LLM extracts from image), `ocr` (OCR then translate), `auto` (OCR fallback to vision) | `vision` |
 
 ---
 
@@ -256,6 +322,8 @@ Usage: `kzktdk translate [OPTIONS] <INPUT>`
 - **Adaptive Inpainting**: Preserves bubble contours and screentone gradients by isolating the inner bubble area and dilating text edges before inpainting.
 - **Elliptical Typesetting**: Wraps text dynamically according to manga bubble geometry to avoid margin overflow.
 - **Color Inversion**: Automatically switches between dark text on light backgrounds and light text on screentone backgrounds based on localized luminance.
+- **Rapid OCR**: PP-OCRv3 models (JP/EN/KR/CN + auto-detect) with session cache, ~2s per page. Models auto-download to `~/.cache/kzktdk/models/rapid/`. Traditional Chinese (cht) not yet supported.
+- **Editor Backend**: Full metadata export/edit/render/preview/watch/pack workflow for GUI integration. See `kzktdk metadata --help` for details.
 
 ---
 
