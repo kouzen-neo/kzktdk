@@ -32,7 +32,7 @@ for bin_path in "${HOME}/.local/bin/kzktdk" "${HOME}/.cargo/bin/kzktdk" "/usr/lo
 done
 
 if [ "$REMOVED_BIN" = false ]; then
-    echo "[-] No kzktdk binary found in ~/.local/bin or /usr/local/bin."
+    echo "[-] No kzktdk binary found in ~/.local/bin, ~/.cargo/bin, or /usr/local/bin."
 fi
 
 # 2. Remove data directory (models, fonts)

@@ -246,3 +246,27 @@ kzktdk translate "page.jpg" --mode vision  # Default
 ### 8.4 Manga OCR (Deprecated)
 
 `--ocr manga` now shows deprecation warning and falls back to noop (stub removed). Use `--ocr rapid` or `--ocr tesseract` instead.
+
+---
+
+## 9. Process Semantics & Exit Codes
+
+`kzktdk` adheres to deterministic UNIX exit code semantics across all subcommands:
+
+| Exit Code | Meaning | Context |
+|:---|:---|:---|
+| `0` | **Success** | All operations completed without error. |
+| `1` | **Operational / Partial Failure** | System error (I/O failure, network unreachable, invalid credentials), or batch run where at least one page failed (original image preserved). |
+| `2` | **Data / Validation Error** | Invalid user input (malformed JSON patch, corrupted metadata, bbox out of bounds, invalid glossary structure, bad argument). |
+| `130` | **Cancelled** | Process terminated by SIGINT / `Ctrl-C`. Currently processing page completes safely while queued pages abort. |
+
+---
+
+## 10. Quality Assurance & Critical Invariants
+
+- **Zero Runtime Panics**: Production code paths contain 0 instances of unhandled `unwrap()` or `expect()`. All errors propagate through `anyhow::Result`.
+- **Single ONNX Forward Pass**: ONNX Runtime bubble inference is decoupled into a single `forward()` pass per image followed by multi-scale detection decoding, preventing redundant tensor copies.
+- **HTTP Connection Pooling**: Global `OnceLock<reqwest::Client>` pool eliminates TCP/TLS socket thrashing during high-volume translation batches.
+- **Memory Efficiency**: Heatmap detection operates on flat 1D indexable buffers rather than nested heap matrices, reducing per-page memory allocation spikes.
+- **Supply Chain**: Continuous automated audits via `cargo audit` in GitHub Actions.
+
