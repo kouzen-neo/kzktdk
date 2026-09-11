@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use image::{GrayImage, Luma, RgbImage};
 use inpaint::prelude::ImageInpaint;
 use std::collections::VecDeque;
@@ -157,6 +157,12 @@ fn morph_close(mask: &GrayImage, radius: i32) -> GrayImage {
 
 /// Inpaints a single bubble crop matching the KZKT OpenCV ImageInpainting algorithm.
 pub fn inpaint_crop(crop: &mut RgbImage) -> Result<()> {
+    inpaint_crop_with_mask(crop, None)
+}
+
+/// Inpaints a crop, OR-ing an optional custom brush mask (white = inpaint)
+/// into the auto-detected text mask. `extra` must match crop dimensions.
+pub fn inpaint_crop_with_mask(crop: &mut RgbImage, extra: Option<&GrayImage>) -> Result<()> {
     let (cols, rows) = crop.dimensions();
     if cols < 4 || rows < 4 {
         return Ok(());
@@ -333,6 +339,26 @@ pub fn inpaint_crop(crop: &mut RgbImage) -> Result<()> {
         }
     }
 
+    // OR in the custom brush mask (GUI) when provided.
+    if let Some(custom) = extra {
+        if custom.dimensions() != (cols, rows) {
+            anyhow::bail!(
+                "Custom mask size {:?} does not match crop {}x{}",
+                custom.dimensions(),
+                cols,
+                rows
+            );
+        }
+        for y in 0..rows {
+            for x in 0..cols {
+                if custom.get_pixel(x, y)[0] > 128 {
+                    final_mask.put_pixel(x, y, Luma([255]));
+                    has_masked_pixels = true;
+                }
+            }
+        }
+    }
+
     if std::env::var("DEBUG_INPAINT").is_ok() {
         let _ = crop.save("/tmp/debug_0_crop.png");
         let _ = bg_mask.save("/tmp/debug_1_bg_mask.png");
@@ -353,10 +379,63 @@ pub fn inpaint_crop(crop: &mut RgbImage) -> Result<()> {
 }
 
 /// Inpaints all detected speech bubbles in the provided image.
+/// Parallelized with rayon (like KZKT ImageInpainting.inpaintTranslated parallel coroutines).
 pub fn inpaint_image(img: &mut RgbImage, detections: &[Detection]) -> Result<()> {
+    let regions: Vec<MaskedRegion> = detections
+        .iter()
+        .map(|d| MaskedRegion {
+            det: d.clone(),
+            mask: None,
+        })
+        .collect();
+    inpaint_regions(img, &regions)
+}
+
+/// A bubble region with an optional custom brush mask (white = inpaint).
+/// When the mask is present it must match the detection crop size exactly.
+#[derive(Debug, Clone)]
+pub struct MaskedRegion {
+    pub det: Detection,
+    pub mask: Option<GrayImage>,
+}
+
+/// Loads a custom brush mask file and validates it against the crop size.
+/// Accepts any image format readable by the `image` crate; pixels with
+/// luminance > 128 count as masked.
+pub fn load_mask_for(path: &std::path::Path, w: u32, h: u32) -> Result<GrayImage> {
+    let img = image::open(path).with_context(|| format!("Failed to open mask {:?}", path))?;
+    let gray = img.to_luma8();
+    if gray.dimensions() != (w, h) {
+        anyhow::bail!(
+            "Mask {:?} size {:?} does not match bubble crop {}x{}",
+            path,
+            gray.dimensions(),
+            w,
+            h
+        );
+    }
+    Ok(gray)
+}
+
+/// Inpaints regions with optional per-region custom masks, in parallel.
+pub fn inpaint_regions(img: &mut RgbImage, regions: &[MaskedRegion]) -> Result<()> {
+    use rayon::prelude::*;
+
     let (orig_w, orig_h) = img.dimensions();
 
-    for det in detections {
+    // Extract crops + rects for parallel processing
+    struct Task {
+        x1: u32,
+        y1: u32,
+        w: u32,
+        h: u32,
+        crop: RgbImage,
+        mask: Option<GrayImage>,
+    }
+
+    let mut tasks: Vec<Task> = Vec::new();
+    for region in regions {
+        let det = &region.det;
         let x1 = det.x1.min(orig_w.saturating_sub(1));
         let y1 = det.y1.min(orig_h.saturating_sub(1));
         let x2 = det.x2.min(orig_w);
@@ -369,21 +448,54 @@ pub fn inpaint_image(img: &mut RgbImage, detections: &[Detection]) -> Result<()>
             continue;
         }
 
-        // Crop the bubble region
+        if let Some(ref m) = region.mask {
+            if m.dimensions() != (w, h) {
+                anyhow::bail!(
+                    "Custom mask size {:?} does not match bubble crop {}x{}",
+                    m.dimensions(),
+                    w,
+                    h
+                );
+            }
+        }
+
         let mut crop = RgbImage::new(w, h);
         for cy in 0..h {
             for cx in 0..w {
                 crop.put_pixel(cx, cy, *img.get_pixel(x1 + cx, y1 + cy));
             }
         }
+        tasks.push(Task {
+            x1,
+            y1,
+            w,
+            h,
+            crop,
+            mask: region.mask.clone(),
+        });
+    }
 
-        // Inpaint the crop in place
-        inpaint_crop(&mut crop)?;
+    if tasks.is_empty() {
+        return Ok(());
+    }
 
-        // Copy clean inpainted pixels back to image
-        for cy in 0..h {
-            for cx in 0..w {
-                img.put_pixel(x1 + cx, y1 + cy, *crop.get_pixel(cx, cy));
+    // Parallel inpaint (CPU-bound). Custom-mask size was validated above,
+    // so per-crop errors here are unexpected; keep first error.
+    let first_err = std::sync::Mutex::new(None::<String>);
+    tasks.par_iter_mut().for_each(|t| {
+        if let Err(e) = inpaint_crop_with_mask(&mut t.crop, t.mask.as_ref()) {
+            *first_err.lock().unwrap() = Some(e.to_string());
+        }
+    });
+    if let Some(msg) = first_err.into_inner().unwrap() {
+        anyhow::bail!("Inpainting failed: {}", msg);
+    }
+
+    // Sequential copy back (needs &mut img)
+    for t in tasks {
+        for cy in 0..t.h {
+            for cx in 0..t.w {
+                img.put_pixel(t.x1 + cx, t.y1 + cy, *t.crop.get_pixel(cx, cy));
             }
         }
     }

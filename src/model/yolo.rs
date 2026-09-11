@@ -190,9 +190,12 @@ impl YoloModel {
         for y in 0..YOLO_INPUT_SIZE {
             for x in 0..YOLO_INPUT_SIZE {
                 let p = padded.get_pixel(x, y);
-                tensor[[0, 0, y as usize, x as usize]] = p[0] as f32 / 255.0;
-                tensor[[0, 1, y as usize, x as usize]] = p[1] as f32 / 255.0;
-                tensor[[0, 2, y as usize, x as usize]] = p[2] as f32 / 255.0;
+                tensor[[0, 0, y as usize, x as usize]] =
+                    p[0] as f32 / crate::config::IMAGE_U8_DIVISOR;
+                tensor[[0, 1, y as usize, x as usize]] =
+                    p[1] as f32 / crate::config::IMAGE_U8_DIVISOR;
+                tensor[[0, 2, y as usize, x as usize]] =
+                    p[2] as f32 / crate::config::IMAGE_U8_DIVISOR;
             }
         }
 
@@ -424,5 +427,21 @@ impl YoloModel {
 
         result.sort_by_key(|b| (b.y1 as u64) * 10000 + b.x1 as u64);
         result
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    /// Compile-time proof that the ONNX session can be shared across threads
+    /// (required for the YOLO model pool in batch translate and for Tauri
+    /// managed state). Fails to compile if `ort::Session` ever loses `Send`.
+    #[test]
+    fn ort_session_and_yolo_model_are_send() {
+        assert_send::<ort::session::Session>();
+        assert_send::<YoloModel>();
     }
 }

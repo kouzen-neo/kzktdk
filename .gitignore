@@ -2,3 +2,4 @@
 /models/*.onnx
 test_*.png
 translated_*.png
+src/bin/test_*.rs

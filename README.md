@@ -173,11 +173,105 @@ kzktdk translate "chapter_01.cbz" \
   --claude-model "claude-3-5-sonnet-20241022"
 ```
 
+### Translate to PDF
+
+PDF input is auto-detected; `--export pdf` packs translated pages into one PDF file (requires a native Pdfium library — see [docs/PDFIUM.md](docs/PDFIUM.md)):
+
+```bash
+kzktdk translate "chapter_01.cbz" --export pdf -o "chapter_01_id.pdf"
+kzktdk translate "chapter_01.pdf" -o "chapter_01_id.pdf" -t Indonesian
+```
+
+### Machine-Readable Progress (for scripts / GUI)
+
+```bash
+# JSONL phases per page on stderr + final summary as JSON on stdout
+kzktdk translate "./manga/chapter_01" -o out/ \
+  --progress jsonl --format json --quiet 2>progress.jsonl >summary.json
+
+# Resume: reuse good pages from a previous run, retranslate only failures
+kzktdk translate "./manga/chapter_01" -o out/ --retry-failed out/
+
+# Glossary: force fixed terms (JSON object: source -> required translation)
+kzktdk translate "./manga/chapter_01" -o out/ --glossary kamus.json
+```
+
+### Exit Codes
+
+| Code | Meaning |
+| :--- | :--- |
+| `0` | Success |
+| `2` | Invalid data (bad metadata/patch/mask/glossary/args) |
+| `1` | System error, or at least one page failed (original copied) |
+| `130` | Cancelled via Ctrl-C (in-flight page finished, queue aborted) |
+
+### Editor Backend Commands
+
+#### Export Detections to JSON (No LLM)
+```bash
+kzktdk metadata export "page.png" --json "page.kedit.json"
+kzktdk metadata export "chapter/" --json "project.kedit.json"
+```
+
+#### Edit Metadata (Set Text, Bbox, Style)
+```bash
+kzktdk metadata edit "page.kedit.json" --set "1=Hello" --bbox "1=100,50,200,80"
+kzktdk metadata edit "page.kedit.json" --font-size "1=22" --text-color "1=255,0,0"
+kzktdk metadata edit "page.kedit.json" --stdin-patch < patch.json  # Transactional patch
+```
+
+#### Render from Metadata (Single or Batch)
+```bash
+# Single page
+kzktdk metadata render "page.png" --metadata "page.kedit.json" -o "rendered.jpg"
+
+# Batch render all pages in project
+kzktdk metadata render --project "project.kedit.json" --images "orig/" -o "rendered/" --jobs auto
+```
+
+#### Preview Single Bubble (Live Editor)
+```bash
+# Save to file
+kzktdk metadata preview "page.png" --metadata "page.kedit.json" --id 1 --text "Hi" -o "preview.jpg"
+
+# Base64 to stdout (for GUI)
+kzktdk metadata preview "page.png" --metadata "page.kedit.json" --id 1 --text "Hi" --to-stdout --thumb 512
+```
+
+#### Show Metadata Table
+```bash
+kzktdk metadata show "page.kedit.json"
+kzktdk metadata show "page.kedit.json" --id 1  # Filter by bubble ID
+kzktdk metadata show "page.kedit.json" --format json  # Machine-readable
+```
+
+#### Watch & Auto Re-render
+```bash
+kzktdk metadata watch --project "project.kedit.json" --images "orig/" -o "rendered/"
+kzktdk metadata watch --project "project.kedit.json" -o "rendered/" --once  # Render once (CI)
+```
+
+#### Pack to CBZ
+```bash
+kzktdk metadata pack "rendered/" -o "chapter.cbz"
+```
+
+### Font Management
+
+```bash
+kzktdk font list                        # List imported fonts
+kzktdk font import "CustomFont.ttf"     # Import font to registry
+kzktdk font set-default "Custom Font"   # Set global default
+kzktdk font get-default                 # Show current default
+kzktdk font remove "Custom Font"        # Remove from registry
+```
+
 ### Inspection and Preprocessing Commands
 
 #### Speech Bubble Detection (Draw Bounding Boxes)
 ```bash
 kzktdk detect "page.png" -o "detected.png"
+kzktdk detect "chapter/" -o "detected/" --json "detections.json"
 ```
 
 #### Inpaint Only (Erase Original Text)
@@ -193,11 +287,16 @@ Usage: `kzktdk translate [OPTIONS] <INPUT>`
 
 | Option | Description | Default |
 | :--- | :--- | :--- |
-| `<INPUT>` | Path to image file (`.jpg`/`.png`/`.webp`), directory, or archive (`.cbz`/`.zip`) | *(Required)* |
+| `<INPUT>` | Path to image file (`.jpg`/`.png`/`.webp`), PDF (`.pdf`), directory, or archive (`.cbz`/`.zip`) | *(Required)* |
 | `-o, --output <PATH>` | Output destination file, directory, or archive | Auto |
-| `--export <FORMAT>` | Batch output format: `auto`, `cbz`, or `folder` | `auto` |
+| `--export <FORMAT>` | Batch output format: `auto`, `cbz`, `folder`, or `pdf` | `auto` |
 | `-t, --target-lang <LANG>` | Target language for dialogue translation | `English` |
 | `--prompt <PROMPT>` | Custom prompt instructions or additional translation rules | - |
+| `--glossary <PATH>` | JSON term map (`source -> required translation`) enforced on output | - |
+| `--progress <MODE>` | Per-phase progress on stderr: `text` or `jsonl` | `text` |
+| `--format <FORMAT>` | Final summary on stdout: `text` or `json` | `text` |
+| `--quiet` | Human logs to stderr (keep stdout machine-clean) | off |
+| `--retry-failed <DIR>` | Reuse good pages from a previous run, retranslate only failures | - |
 | `--batch-size <N>` | Number of dialogue bubbles to batch per LLM translation request | `15` |
 | `-p, --provider <PROVIDER>`| LLM provider: `gemini`, `openai`, `ollama`, or `claude` | `gemini` |
 | `--gemini-key <KEY>` | Gemini API key (or set `GEMINI_API_KEY`) | - |
@@ -210,6 +309,10 @@ Usage: `kzktdk translate [OPTIONS] <INPUT>`
 | `-f, --font <PATH>` | Comic font file (TTF format) | `fonts/Komika Axis.ttf` |
 | `--cjk-font <PATH>` | Font file for CJK glyph rendering | `fonts/KosugiMaru.ttf` |
 | `-m, --model <PATH>` | ONNX model file path | `models/kzkt.onnx` |
+| `--ocr <ENGINE>` | OCR engine for freetext: `none`, `rapid`, `tesseract`, `vision`, `local` | `none` |
+| `--ocr-script <SCRIPT>` | OCR language: `auto`, `jp`, `en`, `kr`, `cn`, `cht` (rapid only supports auto/jp/en/kr/cn) | `jp` |
+| `--translate-free-text` | Detect and translate text outside bubbles (requires `--ocr`) | off |
+| `--mode <MODE>` | Translation mode: `vision` (LLM extracts from image), `ocr` (OCR then translate), `auto` (OCR fallback to vision) | `vision` |
 
 ---
 
@@ -219,6 +322,8 @@ Usage: `kzktdk translate [OPTIONS] <INPUT>`
 - **Adaptive Inpainting**: Preserves bubble contours and screentone gradients by isolating the inner bubble area and dilating text edges before inpainting.
 - **Elliptical Typesetting**: Wraps text dynamically according to manga bubble geometry to avoid margin overflow.
 - **Color Inversion**: Automatically switches between dark text on light backgrounds and light text on screentone backgrounds based on localized luminance.
+- **Rapid OCR**: PP-OCRv3 models (JP/EN/KR/CN + auto-detect) with session cache, ~2s per page. Models auto-download to `~/.cache/kzktdk/models/rapid/`. Traditional Chinese (cht) not yet supported.
+- **Editor Backend**: Full metadata export/edit/render/preview/watch/pack workflow for GUI integration. See `kzktdk metadata --help` for details.
 
 ---
 
@@ -236,3 +341,6 @@ Interested in contributing? Read the complete architecture and development guide
 ## Documentation
 
 For technical architecture, mathematical formulations, and algorithmic details, see [DOCUMENTATION.md](DOCUMENTATION.md).
+GUI integrators start at [DOCUMENTATION.md §7 (GUI Contract)](DOCUMENTATION.md).
+PDF library setup per OS: [docs/PDFIUM.md](docs/PDFIUM.md).
+Planned GPU acceleration: [docs/GPU_ROADMAP.md](docs/GPU_ROADMAP.md).

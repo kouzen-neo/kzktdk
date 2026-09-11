@@ -1,5 +1,15 @@
 pub mod archive;
+pub mod cache;
+pub mod config;
+pub mod editor;
+pub mod font;
 pub mod inpaint;
+pub mod metadata;
 pub mod model;
+pub mod ocr;
+pub mod pipeline;
+pub mod preparer;
+#[cfg(feature = "tauri")]
+pub mod tauri;
 pub mod translation;
 pub mod typesetting;

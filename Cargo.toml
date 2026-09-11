@@ -2,22 +2,33 @@
 name = "kzktdk"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+# Tauri GUI bindings (src/tauri.rs). The GUI project adds `tauri` itself;
+# this feature only gates our command-ready wrappers.
+tauri = []
 
 [dependencies]
 ab_glyph = "0.2.32"
 anyhow = "1.0.104"
 base64 = "0.23.1"
+blake3 = "1.8.2"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 image = "0.25.10"
-imageproc = "0.27.0"
 inpaint = { version = "0.1.7", features = ["image"] }
 natord = "1.0.9"
 ndarray = "0.17.2"
+once_cell = "1"
 ort = "2.0.0-rc.13"
 rayon = "1.12.0"
 reqwest = { version = "0.13.4", features = ["json"] }
-serde = "1.0.229"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+toml = "0.8.20"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["full"] }
 zip = "2"
+pdfium-render = "0.9"
