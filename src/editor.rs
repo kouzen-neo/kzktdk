@@ -664,17 +664,7 @@ impl EditorSession {
         let bubbles: Vec<Bubble> = dets
             .iter()
             .enumerate()
-            .map(|(i, d)| Bubble {
-                id: (i + 1).to_string(),
-                bbox: [d.x1, d.y1, d.x2, d.y2],
-                conf: d.conf,
-                translated: String::new(),
-                bg_color: None,
-                style: None,
-                edited: false,
-                raw_text: None,
-                mask_path: None,
-            })
+            .map(|(i, d)| Bubble::detected((i + 1).to_string(), [d.x1, d.y1, d.x2, d.y2], d.conf))
             .collect();
         let mut data = PageEditData::new(
             img_path

@@ -481,3 +481,22 @@ fn translate_format_json_stdout_stays_pure() {
         });
     }
 }
+
+#[test]
+fn stub_ocr_rec_fails_fast_without_model() {
+    // rapid now has rec; only cht unsupported
+    let (code, _, stderr) = run(&["translate", "--mode", "ocr", "--ocr", "rapid", "--ocr-script", "cht"]);
+    assert_ne!(code, 0, "cht should fail");
+    assert!(
+        stderr.contains("not yet supported") || stderr.contains("Traditional"),
+        "expected cht unsupported, got: {stderr}"
+    );
+    
+    // manga now deprecated/removed, falls back to noop
+    let (code, stdout, stderr) = run(&["translate", "--ocr", "manga", "--help"]);
+    assert_eq!(code, 0, "help should succeed");
+    assert!(
+        stderr.contains("deprecated or removed") || stdout.contains("--ocr"),
+        "manga should warn deprecated"
+    );
+}

@@ -125,7 +125,6 @@ The bundled model (`models/kzkt.dat`) is an obfuscated binary from the KZKT dist
 ---
 
 ## 6. PDF Support (Pdfium)
-
 PDF input/output is implemented in `src/archive.rs` via the `pdfium-render` crate (dynamic binding, no static bundling).
 
 - **Input**: `prepare_input()` accepts `.pdf` → pages are rendered to PNG (`page_0001.png`, target width 1600px) in a `TempDir`, then flow through the normal batch pipeline (`PreparedInput::Batch { is_pdf: true, ... }`).
@@ -187,3 +186,12 @@ kzktdk metadata pack ./rendered -o chapter.cbz --format json
 ### 7.4 Rust library for Tauri (`src/editor.rs`, `src/tauri.rs`)
 
 `EditorSession::new(fonts)` / `open_model(model, fonts)` (YOLO loaded once) + `detect_bubbles`, `export_page`, `load_page`, `render_page`, `preview_bubble`, helpers `thumbnail`, `png_base64`, `bubbles_hash`. Feature `tauri` gates `src/tauri.rs` wrappers (`editor_load_page`, `editor_apply_patch`, `editor_render_page`, `editor_preview_bubble`, `editor_detect`, `editor_pack_chapter`) returning `Result<T, String>` — attach `#[tauri::command]` in the GUI project. No `println!`, no `process::exit` inside the library.
+
+---
+
+## 8. OCR Status (rec explicitly unsupported)
+
+- **Detection works**: YOLO bubble detection + RapidOCR *detection* boxes (when models are cached) are real.
+- **Recognition (rec) is NOT implemented** for the `rapid`/`manga` engines (`src/ocr.rs::rapid_recognize_crop` is a stub). They return **no text** and log a one-time warning — never placeholder guesses (the old fake `テスト`/`フリーテキスト` strings were removed in 0.1.1-dev.17).
+- **Fail fast**: `--translate-free-text` or `--mode ocr` combined with `--ocr rapid|manga` aborts with a clear `not implemented` error (exit 1 / `Err` in Tauri, never a panic, never silent). Enforcement points: `ocr::ensure_rec_available`, called from `translate_page`, `cli::detect::run`, `cli::translate::run`, `tauri::editor_translate_batch` — all before model load, so the error needs no model and no network.
+- **Real alternative today**: `--ocr tesseract` shells out to the external `tesseract` binary (graceful `None` when absent). `--mode auto` keeps working: with an empty `raw_map` it falls back to vision.

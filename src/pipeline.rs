@@ -54,7 +54,7 @@ pub struct TranslationContext<'a> {
     pub metadata_dir: Option<PathBuf>,
     pub translate_free_text: bool,
     pub ocr: String,
-    pub ocr_script: String,
+    pub ocr_script: crate::ocr::OcrScript,
     pub mode: String,
     pub ocr_model: Option<PathBuf>,
     pub glossary: Option<BTreeMap<String, String>>,
@@ -128,6 +128,18 @@ pub async fn translate_page(
     yolo: &mut YoloModel,
     ctx: &TranslationContext<'_>,
 ) -> Result<()> {
+    // Fail fast when rec is explicitly required but the engine is a stub
+    // (never translate placeholder guesses).
+    if ctx.translate_free_text || ctx.mode == "ocr" {
+        let what = if ctx.translate_free_text {
+            "--translate-free-text"
+        } else {
+            "--mode ocr"
+        };
+        if ctx.ocr != "none" {
+            crate::ocr::ensure_rec_available(&ctx.ocr, ctx.ocr_script)?;
+        }
+    }
     let jsonl = ctx.progress == "jsonl";
     let silent_events = ctx.events.is_some();
     let verbose = !(jsonl || ctx.quiet) && !silent_events;
@@ -181,8 +193,7 @@ pub async fn translate_page(
         if ctx.ocr == "none" {
             eprintln!("[freetext] butuh --ocr rapid|manga|tesseract, fallback bubble-only");
         } else {
-            let script = crate::ocr::OcrScript::from_key(&ctx.ocr_script);
-            let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), script);
+            let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
             if engine.name() == "none" {
                 eprintln!("[freetext] engine none, skip freetext");
             } else {
@@ -279,8 +290,7 @@ pub async fn translate_page(
     // --- OCR raw_text gathering (for metadata) ---
     let mut raw_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if ctx.ocr != "none" {
-        let script = crate::ocr::OcrScript::from_key(&ctx.ocr_script);
-        let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), script);
+        let engine = crate::ocr::create_ocr_engine(&ctx.ocr, ctx.ocr_model.as_deref(), ctx.ocr_script);
         if engine.name() != "none" {
             // recognize per crop (bubble + ft)
             for c in &crops {

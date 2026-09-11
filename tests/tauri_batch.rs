@@ -180,3 +180,102 @@ fn failed_page_emits_detect_end_then_failed() {
     assert_eq!(last.total, 1);
     assert!(last.error.is_some());
 }
+
+#[test]
+fn hostile_inputs_fail_gracefully_never_panic() {
+    // Fase-3 anti-panic gauntlet: corrupt/empty images must surface as
+    // per-page `failed` (original copied when possible), and setup-level
+    // garbage (dir-as-image, file-as-out-dir) as `Err` — never a panic.
+    // Completing this test IS the assertion; any panic fails it.
+    let model = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/kzkt.onnx");
+    if !model.is_file() {
+        eprintln!("SKIP hostile_inputs_fail_gracefully_never_panic: models/kzkt.onnx absent");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let corrupt = dir.path().join("corrupt.png");
+    std::fs::write(&corrupt, vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x89, 0x50]).unwrap();
+    let empty = dir.path().join("empty.png");
+    std::fs::write(&empty, b"").unwrap();
+
+    let out = dir.path().join("out");
+    let seen: Arc<Mutex<Vec<ProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_c = seen.clone();
+    let c = closed_port_config(model.to_str().unwrap());
+    let results: Vec<PageResult> = editor_translate_batch(
+        vec![
+            corrupt.to_str().unwrap().to_string(),
+            empty.to_str().unwrap().to_string(),
+        ],
+        out.to_str().unwrap(),
+        c,
+        move |ev| {
+            seen_c.lock().unwrap().push(ev);
+        },
+    )
+    .expect("hostile pages must be per-page failures, not setup errors");
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert!(!r.ok, "hostile input unexpectedly ok: {r:?}");
+        assert!(r.error.is_some(), "missing error detail: {r:?}");
+    }
+    let failed: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.phase == "failed")
+        .map(|e| e.idx)
+        .collect();
+    assert_eq!(failed, vec![1, 2], "expected one failed event per page");
+
+    // Setup-level garbage: directory as image, regular file as out dir.
+    let subdir = dir.path().join("sub");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let r = editor_translate_batch(
+        vec![subdir.to_str().unwrap().to_string()],
+        out.to_str().unwrap(),
+        closed_port_config(model.to_str().unwrap()),
+        |_| {},
+    );
+    assert!(r.is_err(), "directory input should be rejected");
+
+    let file_as_out = dir.path().join("file_out");
+    std::fs::write(&file_as_out, b"x").unwrap();
+    let lone = dir.path().join("lone.png");
+    image::RgbImage::from_pixel(8, 8, image::Rgb([255, 255, 255]))
+        .save(&lone)
+        .unwrap();
+    let r = editor_translate_batch(
+        vec![lone.to_str().unwrap().to_string()],
+        file_as_out.to_str().unwrap(),
+        closed_port_config(model.to_str().unwrap()),
+        |_| {},
+    );
+    assert!(r.is_err(), "file-as-out-dir should be rejected");
+}
+
+#[test]
+fn stub_ocr_rec_is_rejected_before_model_load() {
+    // Fase-4: freetext/mode-ocr with a stub engine is a setup Err
+    // (hermetic: 0-byte image passes the is_file check, guard fires first).
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("p.png");
+    std::fs::write(&png, b"").unwrap();
+    for (freetext, mode) in [(true, "vision"), (false, "ocr")] {
+        let mut c = TranslateConfig::default();
+        c.ocr = "rapid".to_string();
+        c.translate_free_text = freetext;
+        c.mode = mode.to_string();
+        let r = editor_translate_batch(
+            vec![png.to_str().unwrap().to_string()],
+            dir.path().join("out").to_str().unwrap(),
+            c,
+            |_| {},
+        );
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("not implemented"),
+            "freetext={freetext} mode={mode}: unexpected: {e}"
+        );
+    }
+}

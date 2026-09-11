@@ -13,6 +13,75 @@ dan proyek ini mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [0.1.1-dev.17] - 2026-09-10
+
+Branch: `refactor/de-smell` (hasil audit hutang teknis, 4 fase, 4 commit)
+
+### Changed (Fase 1 — god file dipecah)
+- `src/main.rs` 3743 baris → 36 baris (hanya `Cli` parse + dispatch).
+  Tiap match arm pindah utuh (verbatim, nol diff perilaku) ke `src/cli/`:
+  `args.rs` (definisi CLI), `detect.rs`, `translate.rs` (+ `CANCELLED`,
+  `PageRecord`, `retry_hit`, `translate_summary`, `finish_translate`),
+  `metadata.rs`, `font.rs`, `decrypt.rs`, `inpaint.rs`, `util.rs`
+  (helper + `print_developer_help`). `draw_rect` ikut `detect.rs`
+  (satu-satunya pemakai). Verifikasi: `--help` byte-identical, semua test hijau.
+- Perbaikan mekanis akibat pindah: `include_bytes!("../fonts/…")` →
+  `../../fonts/…`, penutup `match` yang ikut terbuang di metadata/font.
+
+### Changed (Fase 2 — konstanta disentralisasi ke `src/config.rs` baru)
+- Satu sumber untuk: endpoint LLM (`OPENAI_DEFAULT_BASE_URL`,
+  `GEMINI_API_BASE`, `ANTHROPIC_API_URL/VERSION`,
+  `gemini_generate_url()` — diuji byte-identical), default CLI
+  (model, font, target, rate, batch, jobs, watch interval, inpaint output),
+  tuning LLM (`LLM_TEMPERATURE`, `CLAUDE_MAX_TOKENS`), retry/backoff
+  (`RATE_LIMIT_RETRY_MAX`, `RETRY_BACKOFF_BASE_MS/MAX_SHIFT` — jadwal
+  1s/2s/4s/8s diuji), vision (`IMAGE_U8_DIVISOR` bit-identical,
+  `MERGE_NEARBY_GAP_PX`), lock-file metadata, URL unduhan OCR.
+- `default_value` literal di clap → `default_value_t`/`default_value`
+  merujuk const (`--help` tetap identik, terverifikasi diff).
+- `tauri::TranslateConfig` SENGAJA menyimpan default GUI-nya sendiri
+  (model Gemini/Claude + batch_size memang beda dari CLI); hanya URL
+  OpenAI yang dishare. Nilai 6.0/0.8 YOLO ternyata sudah const
+  (`FALSE_GIANT_*`) — tidak diubah.
+- `rg https?:// src/` kini hanya mengenai `config.rs` + help-text.
+
+### Fixed (Fase 3 — steril `unwrap`/`expect` di path runtime)
+- NOL `unwrap`/`expect` di `src/cli/`, `editor.rs`, `translation/`,
+  `pipeline.rs`, `cache.rs` pada path runtime (sisa hanya di `#[cfg(test)]`
+  + 2 komentar `// OK:` pada invarian yang mustahil + `unwrap_or*`).
+- `cache.rs`: `Mutex::lock` poison → error `anyhow` (bukan panic).
+- `cli::translate`: provider tak dikenal + pool-YOLO exhausted → gagal
+  per-halaman graceful (original disalin, `failed` di summary) bukan panic;
+  `finish_translate` kini `-> Result`; semaphore/pool memakai
+  match-`Err` → failure tuple; `file_name()` lewat helper
+  `util::file_name()` (`with_context`); serialisasi JSON memakai
+  `.context()?`.
+- `cli::detect`: closure `make_page_with_ft` kini `-> Result` (+ `?` di
+  2 call-site); `cli::metadata` sort closure memakai `unwrap_or_default`
+  (bukan path `Result`); `Mask --from` via let-else `bail!`.
+- Test baru `tauri_batch::hostile_inputs_fail_gracefully_never_panic`:
+  gambar korup/0-byte → `failed` per halaman, direktori-jadi-input dan
+  file-jadi-out-dir → `Err` setup — tanpa panic.
+
+### Changed (Fase 4 — OCR rec dinyatakan UNSUPPORTED eksplisit, opsi b)
+- Keputusan: implementasi `rec` beneran DITUNDA; sebagai gantinya stub
+  dibuat jujur + fail-fast (alasan: stub lama mengembalikan teks Jepang
+  palsu `テスト`/`フリーテキスト`/`テキスト` yang diam-diam meracuni
+  `--mode ocr` dan `raw_text`).
+- `src/ocr.rs`: `engine_rec_stub()` + `ensure_rec_available()` baru;
+  `RapidOcr`/`MangaOcr::recognize` → `None` + warning sekali;
+  `recognize_regions` → kosong/jujur (kotak deteksi real dipertahankan,
+  tanpa placeholder); `tesseract` TIDAK diubah (real via binary eksternal).
+- Fail-fast sebelum load model (hermetik, tanpa model/jaringan):
+  `translate_page`, `cli::detect::run`, `cli::translate::run`,
+  `tauri::editor_translate_batch`. `--mode auto` tetap fallback vision.
+- `--ocr --help` + `DOCUMENTATION.md §8` baru mendokumentasikan status.
+- Test: 3 unit `ocr::tests`, 1 kontrak CLI hermetik, 1 Tauri hermetik.
+- Total test: 19 unit + 14 kontrak CLI + 9 tauri, hijau;
+  `clippy --all-targets` 0 error dengan/tanpa feature.
+
+---
+
 ## [0.1.1-dev.16] - 2026-09-10
 
 Branch: `dev-kz-debug`

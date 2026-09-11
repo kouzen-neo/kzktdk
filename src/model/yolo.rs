@@ -190,9 +190,12 @@ impl YoloModel {
         for y in 0..YOLO_INPUT_SIZE {
             for x in 0..YOLO_INPUT_SIZE {
                 let p = padded.get_pixel(x, y);
-                tensor[[0, 0, y as usize, x as usize]] = p[0] as f32 / 255.0;
-                tensor[[0, 1, y as usize, x as usize]] = p[1] as f32 / 255.0;
-                tensor[[0, 2, y as usize, x as usize]] = p[2] as f32 / 255.0;
+                tensor[[0, 0, y as usize, x as usize]] =
+                    p[0] as f32 / crate::config::IMAGE_U8_DIVISOR;
+                tensor[[0, 1, y as usize, x as usize]] =
+                    p[1] as f32 / crate::config::IMAGE_U8_DIVISOR;
+                tensor[[0, 2, y as usize, x as usize]] =
+                    p[2] as f32 / crate::config::IMAGE_U8_DIVISOR;
             }
         }
 

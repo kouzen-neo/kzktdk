@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::time::Duration;
 
+use crate::config;
 use crate::model::yolo::Detection;
 use crate::typesetting::Typesetter;
 
@@ -211,10 +212,7 @@ impl Provider {
 
         let response_text = match self {
             Provider::Gemini { api_key, model } => {
-                let url = format!(
-                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                    model, api_key
-                );
+                let url = config::gemini_generate_url(model, api_key);
 
                 let body = serde_json::json!({
                     "contents": [{
@@ -229,7 +227,7 @@ impl Provider {
                         ]
                     }],
                     "generationConfig": {
-                        "temperature": 0.2,
+                        "temperature": config::LLM_TEMPERATURE,
                         "response_mime_type": "application/json"
                     }
                 });
@@ -270,7 +268,7 @@ impl Provider {
                             }
                         ]
                     }],
-                    "temperature": 0.2,
+                    "temperature": config::LLM_TEMPERATURE,
                     "response_format": { "type": "json_object" }
                 });
 
@@ -303,11 +301,11 @@ impl Provider {
                     .to_string()
             }
             Provider::Claude { api_key, model } => {
-                let url = "https://api.anthropic.com/v1/messages";
+                let url = config::ANTHROPIC_API_URL;
 
                 let body = serde_json::json!({
                     "model": model,
-                    "max_tokens": 1024,
+                    "max_tokens": config::CLAUDE_MAX_TOKENS,
                     "messages": [{
                         "role": "user",
                         "content": [
@@ -326,7 +324,10 @@ impl Provider {
 
                 let mut headers = HeaderMap::new();
                 headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
-                headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+                headers.insert(
+                    "anthropic-version",
+                    HeaderValue::from_static(config::ANTHROPIC_API_VERSION),
+                );
 
                 let res = client.post(url).headers(headers).json(&body).send().await?;
                 if !res.status().is_success() {
@@ -362,13 +363,10 @@ impl Provider {
         let full_prompt = format!("{}\n\nInput:\n{}", prompt, text);
         match self {
             Provider::Gemini { api_key, model } => {
-                let url = format!(
-                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                    model, api_key
-                );
+                let url = config::gemini_generate_url(model, api_key);
                 let body = serde_json::json!({
                     "contents": [{ "parts": [{ "text": full_prompt }] }],
-                    "generationConfig": { "temperature": 0.2, "response_mime_type": "application/json" }
+                    "generationConfig": { "temperature": config::LLM_TEMPERATURE, "response_mime_type": "application/json" }
                 });
                 let res = client.post(&url).json(&body).send().await?;
                 if !res.status().is_success() {
@@ -393,7 +391,7 @@ impl Provider {
                 let body = serde_json::json!({
                     "model": model,
                     "messages": [{ "role": "user", "content": full_prompt }],
-                    "temperature": 0.2,
+                    "temperature": config::LLM_TEMPERATURE,
                     "response_format": { "type": "json_object" }
                 });
                 let mut headers = HeaderMap::new();
@@ -423,15 +421,18 @@ impl Provider {
                     .to_string())
             }
             Provider::Claude { api_key, model } => {
-                let url = "https://api.anthropic.com/v1/messages";
+                let url = config::ANTHROPIC_API_URL;
                 let body = serde_json::json!({
                     "model": model,
-                    "max_tokens": 1024,
+                    "max_tokens": config::CLAUDE_MAX_TOKENS,
                     "messages": [{ "role": "user", "content": full_prompt }]
                 });
                 let mut headers = HeaderMap::new();
                 headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
-                headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+                headers.insert(
+                    "anthropic-version",
+                    HeaderValue::from_static(config::ANTHROPIC_API_VERSION),
+                );
                 let res = client.post(url).headers(headers).json(&body).send().await?;
                 if !res.status().is_success() {
                     bail!(
@@ -473,8 +474,8 @@ pub struct RateLimiter {
 impl Default for RateLimiter {
     fn default() -> Self {
         Self {
-            max_rps: 3,
-            retry_max: 3,
+            max_rps: config::DEFAULT_RATE_LIMIT_RPS,
+            retry_max: config::RATE_LIMIT_RETRY_MAX,
         }
     }
 }
@@ -483,7 +484,7 @@ impl RateLimiter {
     pub fn new(max_rps: u32) -> Self {
         Self {
             max_rps: max_rps.max(1),
-            retry_max: 3,
+            retry_max: config::RATE_LIMIT_RETRY_MAX,
         }
     }
 
@@ -495,7 +496,10 @@ impl RateLimiter {
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..=self.retry_max {
             if attempt > 0 {
-                let backoff = Duration::from_millis(1000 * (1 << (attempt - 1).min(3)));
+                let backoff = Duration::from_millis(
+                    config::RETRY_BACKOFF_BASE_MS
+                        * (1u64 << (attempt - 1).min(config::RETRY_BACKOFF_MAX_SHIFT)),
+                );
                 if verbose {
                     println!(
                         "  [RateLimit] Retry {}/{} after {}ms",
