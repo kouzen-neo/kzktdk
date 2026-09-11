@@ -3,11 +3,23 @@
 
 # Language detection: ensure GitHub displays 100% Rust
 *.md linguist-documentation
+*.txt linguist-documentation
+*.toml linguist-generated
+*.lock linguist-generated
+*.json linguist-generated
+*.sh linguist-vendored
 docs/** linguist-documentation
 models/** linguist-vendored
 fonts/** linguist-vendored
+scripts/** linguist-vendored
+tests/** linguist-detectable=false
 Cargo.lock linguist-generated
-Cargo.toml linguist-detectable=false
-.gitignore linguist-detectable=false
+Cargo.toml linguist-generated
+.gitignore linguist-generated
+README.md linguist-documentation
+CHANGELOG.md linguist-documentation
+DOCUMENTATION.md linguist-documentation
+CONTRIBUTING.md linguist-documentation
 
 *.rs linguist-detectable=true
+*.rs linguist-language=Rust
