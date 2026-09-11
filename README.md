@@ -3,6 +3,10 @@
   <h1>KZKT-DK (kzktdk)</h1>
   <p><b>High-Performance Native Manga & Comic Translation CLI</b></p>
   <p>A standalone command-line translation tool ported with full algorithmic fidelity from <a href="https://github.com/kouzen-neo/kzkt">KZKT Android</a>.</p>
+  
+  [![Release](https://img.shields.io/github/v/release/kouzen-neo/kzktdk?style=flat-square)](https://github.com/kouzen-neo/kzktdk/releases)
+  [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](LICENSE)
+  [![Rust](https://img.shields.io/badge/rust-100%25-orange?style=flat-square)](https://www.rust-lang.org)
 </div>
 
 ---
@@ -14,10 +18,12 @@
 It brings the complete translation pipeline of KZKT Mobile to the desktop as a fast, standalone executable:
 
 - **Local Speech Bubble Detection**: Employs an on-device 3-stage YOLOv8 ONNX cascade model to accurately isolate speech bubbles, false-giant backgrounds, and skewed text areas.
+- **Rapid OCR (NEW v0.2.0)**: PP-OCRv3 models for Japanese, English, Korean, Chinese with auto-language detection. Recognizes text at ~2 seconds per page with automatic model download.
 - **Adaptive Text Inpainting**: Isolates dialogue strokes and applies morphological dilation before Telea Fast Marching inpainting, erasing original Japanese, Korean, or Chinese text while preserving paper grain, screentones, and bubble borders.
 - **Multi-Provider LLM Translation**: Direct integration with Google Gemini, OpenAI (GPT), Anthropic (Claude), OpenRouter, or 100% offline local vision models running through Ollama.
 - **Diamond & Elliptical Typesetting**: Uses an elliptical line-budget algorithm that naturally wraps translated text inside curved manga bubbles without overflow, combined with language-aware phonetic syllable hyphenation.
-- **Batch & Comic Archive Processing**: Translates individual images (`.png`, `.jpg`, `.webp`), whole image folders, or `.cbz` / `.zip` comic books with natural alphanumeric page sorting (`1, 2, ..., 9, 10`).
+- **Editor Backend (NEW v0.2.0)**: Full metadata export/edit/render/preview workflow with JSON sidecar files, ready for GUI integration. Live bubble preview, batch rendering, and CBZ packing.
+- **Batch & Comic Archive Processing**: Translates individual images (`.png`, `.jpg`, `.webp`), whole image folders, or `.cbz` / `.zip` / `.pdf` comic books with natural alphanumeric page sorting (`1, 2, ..., 9, 10`).
 
 ---
 
@@ -102,6 +108,71 @@ $env:GEMINI_API_KEY = "AIzaSy..."
 
 # Permanent user environment variable:
 [System.Environment]::SetEnvironmentVariable('GEMINI_API_KEY', 'AIzaSy...', 'User')
+```
+
+---
+
+## ✨ Features (v0.2.0)
+
+### 🚀 Translation Pipeline
+- **Multi-Provider Support**: Gemini, OpenAI, Claude, OpenRouter, or local Ollama models
+- **Translation Cache**: SQLite-based cache with blake3 hashing for instant retranslation
+- **Glossary Enforcement**: JSON term mapping with strict LLM compliance checking
+- **Retry & Resume**: `--retry-failed` reuses good pages, retranslates only failures
+- **Progress Tracking**: JSONL streaming for real-time GUI integration
+
+### 🔍 OCR & Detection
+- **Rapid OCR (NEW)**: PP-OCRv3 models for JP/EN/KR/CN with auto-language detection (~2s/page)
+- **3-Stage YOLO Cascade**: 0.28/0.18/0.10 confidence thresholds with IoU filtering
+- **Freetext Detection**: Capture text outside bubbles with merge-nearby algorithm
+- **Tesseract Integration**: Shell-out to external binary for 100+ languages
+
+### 🎨 Editor Backend (NEW)
+- **7 Metadata Commands**: export, edit, render, preview, show, watch, pack
+- **JSON Sidecar Files**: `.kedit.json` per page + project-level metadata
+- **Live Preview**: Single bubble rendering in <100ms for GUI editors
+- **Batch Rendering**: Parallel rendering with `--jobs auto`
+- **Transactional Editing**: `--stdin-patch` with rollback on error
+
+### 🖋️ Font Management (NEW)
+- **Font Registry**: `~/.local/share/kzktdk/fonts` with global defaults
+- **Per-Bubble Override**: Custom font family, size, color, stroke, alignment
+- **CJK Support**: Separate Latin + CJK font handling
+
+### 📦 Archive Support
+- **CBZ/ZIP/EPUB**: Natural sort (1,2,10) with alphanumeric awareness
+- **PDF**: Input + output via Pdfium bindings (see `docs/PDFIUM.md`)
+- **Batch Processing**: Parallel detection/inpainting/translation with semaphore pool
+
+### 🛡️ Quality & Safety
+- **Zero Runtime Unwrap**: All panics eliminated from production paths
+- **Supply Chain Audit**: GitHub Actions workflow, EUPL-1.2 inpaint accepted
+- **Dual License**: MIT OR Apache-2.0
+- **43 Tests**: 20 unit + 14 CLI contract + 9 Tauri integration
+
+---
+
+## 🚀 Quick Start
+
+```bash
+# 1. Install
+cargo install --path .
+
+# 2. Set API key (choose one)
+export GEMINI_API_KEY="AIzaSy..."        # Gemini (recommended)
+export OPENAI_API_KEY="sk-proj-..."     # OpenAI
+export ANTHROPIC_API_KEY="sk-ant-..."   # Claude
+
+# 3. Translate a manga chapter
+kzktdk translate chapter_01.cbz -t Indonesian
+
+# 4. Try Rapid OCR (auto-detects language)
+kzktdk translate page.jpg --ocr rapid --ocr-script auto
+
+# 5. Use local Ollama (100% offline)
+kzktdk translate chapter.cbz --provider ollama \
+  --openai-base-url http://localhost:11434/v1 \
+  --openai-model llama3.2-vision
 ```
 
 ---
