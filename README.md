@@ -29,7 +29,25 @@ It brings the complete translation pipeline of KZKT Mobile to the desktop as a f
 
 ## Installation
 
-### Prerequisites
+### Quick Install (No Rust or Compilation Required)
+
+The fastest way to install the pre-compiled `kzktdk` CLI binary and required assets:
+
+#### Linux & macOS
+```bash
+curl -fsSL https://raw.githubusercontent.com/kouzen-neo/kzktdk/master/install.sh | bash
+```
+
+#### Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/kouzen-neo/kzktdk/master/install.ps1 | iex
+```
+
+---
+
+### Build from Source (Developers)
+
+#### Prerequisites
 
 Ensure you have the following installed on your system:
 - **Rust toolchain** (`cargo` and `rustc`)
